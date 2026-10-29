@@ -4,7 +4,7 @@
 
 > 当前阶段：产品设计与交互原型。应用代码、在线 Demo 和生产部署尚未完成。本文档描述的是 MVP 目标，不代表已有功能。
 
-本项目由作者作为求职作品集和工程实践准备，计划整理为开源项目。**开源许可证尚未确定**；许可证确定并添加前，不应假设项目已采用 MIT 或其他许可。
+本项目由作者作为求职作品集和工程实践准备，采用 [MIT License](LICENSE) 开源。
 
 ## 项目解决什么问题
 
@@ -102,12 +102,12 @@ openspec/    产品行为规格和实施任务
 
 **MVP 支持多人同时编辑吗？** 不支持。首版按一个用户编辑个人画布设计。
 
-**项目采用什么开源许可证？** 尚未决定。许可证文件添加前，不应视为采用 MIT 或其他开源协议。
+**项目采用什么开源许可证？** 本仓库采用 MIT License，完整条款见 [LICENSE](LICENSE)。
 
 ## English Summary
 
-Online Canvas Platform is a portfolio project for an AI-assisted infinite canvas web application. The planned MVP combines a dark dotted canvas, private image assets, personal projects, and bounded multi-agent workflows with human review. The target stack is React, TypeScript, Konva, FastAPI, LangGraph, PostgreSQL, Redis/ARQ, and MinIO, with a single-server Docker Compose deployment. The repository currently contains product and architecture documentation plus visual references; the application is not implemented yet. The project is being prepared for job applications, and its open-source license is still undecided.
+Online Canvas Platform is a portfolio project for an AI-assisted infinite canvas web application. The planned MVP combines a dark dotted canvas, private image assets, personal projects, and bounded multi-agent workflows with human review. The target stack is React, TypeScript, Konva, FastAPI, LangGraph, PostgreSQL, Redis/ARQ, and MinIO, with a single-server Docker Compose deployment. The repository currently contains product and architecture documentation plus visual references; the application is not implemented yet. The project is prepared for job applications and released under the MIT License.
 
 ## License
 
-**To be decided.** No license has been selected or included yet.
+This project is licensed under the [MIT License](LICENSE).

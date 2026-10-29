@@ -41,7 +41,8 @@ MVP 收敛为个人在线无限画布和多 Agent 创作；产品/技术文档�
 - `openspec validate --all --strict --no-interactive` 通过（1 个 change）；26 个 Markdown 文件的相对链接检查通过。
 - 已补充多 Agent 的商品海报示例和产品价值说明，明确用户只提交一次目标、结果先审阅后写回；生图/改图 API 暂不开发，等待用户提供接口文档。
 - 账号需求已改为用户名/密码；同步修改 README、PRD、产品边界、交互和原型说明、数据模型及 OpenSpec，不收集邮箱。
-- README 已按 GitHub 项目介绍和 SEO/GEO 可读性重写，明确项目状态、Agent 作用、MVP、技术方案、路线图、FAQ、文档入口及求职作品集用途；许可证待决定。Git 根仅为 `online-canvas-platform`，个人备忘录已排除在提交范围外。
+- README 已按 GitHub 项目介绍和 SEO/GEO 可读性重写，明确项目状态、Agent 作用、MVP、技术方案、路线图、FAQ、文档入口及求职作品集用途；MIT 许可证已添加。Git 根仅为 `online-canvas-platform`，个人备忘录已排除在提交范围外。
+- 用户已确定采用 MIT；仓库根目录添加标准 MIT `LICENSE`，README 中英文内容和 FAQ 已同步更新。
 - `AGENTS.md` 已规定涉及技术库和 API 时使用 Context7 先查当前官方文档；本轮 LangGraph 的 State/Nodes/Edges、并行、审批中断和持久化设计已按 Context7 文档记录。
 - 架构图已更新为单用户画布和多 Agent 部署，不含 Hocuspocus/Yjs。
 - 本轮只更新产品/技术文档，没有运行应用构建、测试或端到端流程。

@@ -1,6 +1,6 @@
 # 前端 UI 开发计划
 
-> 状态：前端技术与视觉实现计划；尚未开始 UI 代码。视觉基准为 `docs/02-design/prototypes/` 下的页面参考图。
+> 状态：首版前端静态与交互原型已实现；桌面/窄屏参考图走查及 Agent 审批、结果审阅状态仍待完善。视觉基准为 `docs/02-design/prototypes/` 下的页面参考图。
 
 ## 1. 结论：现有画布栈够用，补齐 UI 层即可
 
@@ -56,18 +56,24 @@ shadcn/ui 组件需按项目令牌调整后使用，不能直接套用默认模�
 ### 无限画布编辑器
 
 ```text
-┌ Logo / 项目 / 画布 / 保存状态             缩放 / 撤销 / 账户 ┐
-│ 左侧图层与素材 │  CSS 点阵背景 + Konva 无限画布 │ Agent 面板  │
-│                │                                │ 计划/任务树  │
-│                │                                │ 参考素材/输入│
-│                │       浮动底部工具栏             │              │
-└────────────────┴────────────────────────────────┴──────────────┘
+┌ Logo / 项目 / 画布 / 保存状态 / 会话草稿 / 账户 ┐
+│ 画布/素材/图层 │  CSS 点阵背景 + Konva 无限画布 │ Agent 执行区│
+│                │                                │ 计划/任务树 │
+│                │ 顶部固定：选择/手/撤销/重做       │ 输出/审阅   │
+├───────────────────────────────────────────────────────────────┤
+│     底部 AI 输入：桌面约 1/3 居中，窄屏接近全宽               │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-- Konva Stage 始终填充可视区域；对象使用画布世界坐标，缩放和平移由 viewport 控制，不做固定画板边框。
+- Konva Stage 始终填充可视区域；工具栏固定在可视画布顶部，不因绘制或 viewport 变换而位移，只显示选择箭头、手形、撤销和重做。对象使用画布世界坐标，缩放和平移由 viewport 控制，不做固定画板边框。
 - 点阵使用与 viewport 同步的 CSS `radial-gradient` 背景，避免把大量点逐个绘制为可命中 Konva 节点。
 - 顶栏、左右栏、浮动工具栏、Agent 任务树和对象检查器使用 DOM/CSS；需要键盘焦点的控件不绘制进 Canvas。
-- 左侧图层面板可折叠；右侧素材/图层/Agent 面板以标签切换，Agent 面板支持收起。
+- 左侧提供画布入口、素材库入口和图层显隐/选择；右侧仅展示可缩窄/恢复的 Agent 执行过程、输出和审阅。
+- 常驻工具栏只保留选择、平移、撤销/重做；移除文字、图片、形状、连接线和画笔图标。选择工具支持框选多对象。顶栏不放分享、预览和缩放按钮，缩放操作只保留在画布左下角。
+- AI 对话输入固定在编辑器底部，桌面约占视口三分之一并居中，窄屏接近全宽。参考图可从素材库选择或作为临时图片导入；图片和生成预览需用户点击“保存到资产”才加入资产库。右侧执行面板不重复放输入入口。
+- 单张画布图片被选中时显示专属 AI 对话浮层；发送后把该图自动附加到当前请求并打开 Agent 执行面板。
+- 素材卡片支持单张快捷加入画布；从编辑器进入素材库时保留当前画布 ID，加入后返回原画布。
+- Agent 右侧面板按三步计划展示解析画布、生成方案和输出结果，并用已完成/运行中/待开始状态表达进度；结果生成后再显示提案审阅/应用。Agent 配置页面保留大字号主内容，将左侧导航轨宽度收至约 168–190px。模型字段维持易读尺寸。
 - 桌面优先对齐参考图；窄屏将侧栏改为抽屉，保持画布操作区可用，不承诺手机端完整编辑体验。
 
 ### 素材库和账户
@@ -104,11 +110,19 @@ shadcn/ui 组件需按项目令牌调整后使用，不能直接套用默认模�
 
 ## 7. Context7 查阅记录
 
-查阅日期：2026-10-29。实现版本暂未锁定，脚手架创建时需再检查版本兼容性。
+查阅日期：2026-10-29。实现前按 Context7/官方文档确认框架 API，依赖版本以 pnpm lockfile 为准。
 
 | 库 | Context7 ID | 设计结论 | 官方文档 |
 |---|---|---|---|
-| React Konva | `/konvajs/react-konva` | Stage/Layer/节点和事件处理可支撑对象画布；HTML 页面控件留在 DOM。缩放时对象变换需归一化到文档尺寸。 | [React Konva](https://konvajs.org/docs/react/index.html) |
+| Konva | `/konvajs/site` | Stage/Layer/Line/Transformer 支撑自由绘制、拖框选择和多对象变换；指针坐标需从视口平移/缩放还原到画布坐标。 | [Konva](https://konvajs.org/docs/index.html) |
 | Tailwind CSS | `/tailwindlabs/tailwindcss.com` | Vite 插件、CSS `@theme` 令牌可实现统一暗色主题和断点。 | [Tailwind CSS](https://tailwindcss.com/docs/installation/using-vite) |
 | shadcn/ui | `/websites/ui_shadcn` | Vite + Tailwind 可组合；组件源码可定制为本项目视觉，图标库配置可用 Lucide。 | [shadcn/ui Vite](https://ui.shadcn.com/docs/installation/vite) |
 | React Router | `/remix-run/react-router` | Vite SPA 采用 BrowserRouter/Routes 的 declarative 模式，不需要引入框架模式。 | [React Router Declarative](https://reactrouter.com/start/declarative/installation) |
+| React Router `useSearchParams` | `/remix-run/react-router` | 素材库从画布入口接收 `canvas` 查询参数，并在添加素材后返回对应画布路由。 | [useSearchParams](https://reactrouter.com/api/hooks/useSearchParams) |
+| React Router `useParams` | `/remix-run/react-router` | 从动态画布路由读取 canvas ID，并以 React `key` 在切换画布时重建编辑器实例。 | [useParams](https://reactrouter.com/api/hooks/useParams) |
+
+实现首版后锁定并验证的直接依赖版本：React 19.3.1、React Router 7.18.5、react-konva 19.3.2、Konva 10.9.0、Tailwind CSS 4.3.3、Vite 8.3.5、TypeScript 7.0.2、Lucide React 1.63.0。锁文件为 `pnpm-lock.yaml`；运行 `pnpm --filter @canvas/web typecheck` 和 `pnpm --filter @canvas/web build` 均通过。该版本记录描述当前依赖解析结果，升级前仍需按 Context7/官方文档复核兼容性。
+
+当前页面覆盖项目首页、素材库、无限画布、用户名登录/注册、账户设置和 Agent 设置。无限画布保留选择、单/多对象变换、显隐、画笔与对象配色、图片/文字/形状/连接线、缩放和撤销/重做；常驻工具栏只显示选择、手形、撤销/重做并固定在画布顶部。选中图片可发起专属 AI 对话，图像对象标题仍在独立标签层。AI 输入和上传入口固定在编辑器底部，桌面约占视口三分之一，窄屏接近全宽。导入图片和生成预览先作为临时内容，用户保存后才加入原型内存资产列表。素材卡片可将单张图片直接加入来源画布；Agent 侧栏可收窄并只展示任务和结果。页面使用本地 fixture，尚未接入服务端持久化、真实登录、模型连接或 Agent 执行；内存资产和画布草稿刷新后不保留。
+
+画笔和选取交互以 Context7 最新检索的 Konva 官方示例为依据：自由绘制使用 Line points，框选以画布坐标计算矩形相交，Transformer 绑定当前选中的节点；参见 [Free Drawing](https://konvajs.org/docs/sandbox/Free_Drawing.html) 与 [Basic Select and Transform](https://konvajs.org/docs/select_and_transform/Basic_demo.html)。

@@ -3,8 +3,8 @@
 ## 1. 产品设计与 UI 基线
 
 - [x] 1.1 完成 PRD、个人编辑产品交互、系统架构、数据模型与技术选型；通过跨文档范围核对和 OpenSpec 校验。
-- [ ] 1.2 补齐个人项目、画布保存/冲突和多 Agent 并行/审批/结果审阅原型；通过原型清单走查。
-- [ ] 1.3 按前端 UI 计划建立 React/Vite/TypeScript、React Router、Tailwind、shadcn/ui、Lucide 与 react-konva 基础框架；通过页面路由、设计令牌和桌面/窄屏静态页面对照参考图走查。
+- [ ] 1.2 补齐个人项目、画布保存/冲突和多 Agent 并行/审批/结果审阅原型；通过原型清单走查。当前已补顶部固定工具栏、单图 AI 对话和图片临时/保存到资产交互；保存冲突与失败恢复状态仍待补。
+- [x] 1.3 按前端 UI 计划建立 React/Vite/TypeScript、React Router、Tailwind、shadcn/ui 配置、Lucide 与 react-konva 基础框架；通过路由、静态页面、桌面/窄屏参考图走查。
 
 ## 2. Monorepo 与单机基础设施
 
@@ -21,7 +21,7 @@
 
 ## 4. 无限画布与云端保存
 
-- [ ] 4.1 建立 CanvasDocument/元素 schema 与 react-konva 渲染；通过图片/文字/形状增删改、平移缩放和对象变换走查。
+- [ ] 4.1 建立 CanvasDocument/元素 schema 与 react-konva 渲染；通过图片/文字/形状/画笔增删改、框选多对象、图层显隐、平移缩放和对象变换走查。当前前端原型交互已补齐，schema 与服务端持久化待后续实现。
 - [ ] 4.2 实现 JSONB 快照、schema_version、revision、base_revision 检查和 canvas_versions；通过重开恢复及旧 revision 拒绝复核。
 - [ ] 4.3 实现自动保存、失败草稿、撤销/重做和版本恢复；通过断网、重试、冲突提示和操作批次复核。
 
@@ -46,7 +46,7 @@
 
 ## Workflow follow-up
 
-- 产品设计文档已就绪；下一步由用户按 `docs/02-design/product-design.md` 补 Agent 原型并开始 UI 前端调试。
+- 产品设计文档和首版前端 UI 原型持续按备忘录调整；保存冲突/失败恢复等原型状态仍需补齐，再进入 API 与 Worker 开发。
 - 多人同时编辑不在当前 change 中；未来需求确认后另行规划。
 - 生图/改图 API 等用户提供接口和文档后另行规划；当前不开发其调用。
 - MVP 规格与任务完成并验收后，再归档 `platform-foundation`。

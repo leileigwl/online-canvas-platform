@@ -1,0 +1,13 @@
+{
+  "name": "online-canvas-platform",
+  "private": true,
+  "packageManager": "pnpm@10.32.1",
+  "scripts": {
+    "dev": "turbo dev --filter=@canvas/web",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.6"
+  }
+}

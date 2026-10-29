@@ -1,8 +1,8 @@
 # 在线 AI 无限画布平台 | Online Canvas Platform
 
-**一个面向个人创作者的在线无限画布产品设计与全栈工程作品集项目。**它探索如何把黑色点阵画布、个人图片素材和有边界的多 Agent 协作整合到一个可自托管的 Web 平台中。
+**一个面向个人创作者的在线无限画布产品与全栈工程作品集项目。**它探索如何把黑色点阵画布、个人图片素材和有边界的多 Agent 协作整合到一个可自托管的 Web 平台中。
 
-> 当前阶段：产品设计与交互原型。应用代码、在线 Demo 和生产部署尚未完成。本文档描述的是 MVP 目标，不代表已有功能。
+> 当前阶段：前端交互原型。已实现项目首页、无限画布工作区、素材库、用户名登录注册、账户设置和 Agent 配置页面；数据使用演示素材与前端状态，尚未连接 API、数据库或 MinIO，不能作为在线服务使用。
 
 本项目由作者作为求职作品集和工程实践准备，采用 [MIT License](LICENSE) 开源。
 
@@ -36,6 +36,29 @@
 - Agent 配置、目标拆解、有限并行、审批、结果预览、取消和失败重试。
 - PostgreSQL、Redis/ARQ、MinIO 和单服务器 Docker Compose 部署。
 
+### 当前原型可操作范围
+
+- 项目首页可进入画布，画布支持对象选择、拖动、缩放、平移和工具栏切换。
+- 素材库可搜索、筛选、多选，并把选择项加入画布或作为 Agent 参考素材；上传仅在浏览器中预览，不会传到服务器。
+- Agent 面板可展示 Coordinator/子 Agent 任务树、参考素材、画布修改预览，以及提案接受/拒绝；当前是交互演示，不会调用模型或写入服务端数据。
+- 登录、注册与 Agent 设置用于 UI 流程预览；账户和模型配置不会真实保存。
+
+## 本地启动
+
+需要 Node.js 20.19+（或 22.12+）与 pnpm 10。
+
+```bash
+pnpm install
+pnpm dev
+```
+
+前端默认在 `http://localhost:5173`。构建和类型检查：
+
+```bash
+pnpm --filter @canvas/web typecheck
+pnpm --filter @canvas/web build
+```
+
 ### 暂不纳入
 
 - 多人同时编辑同一画布、项目邀请和实时协作。
@@ -57,7 +80,7 @@
 | 图片存储 | MinIO | 私有图片对象和未来图像服务结果 |
 | 部署 | Docker Compose、Caddy | 单服务器应用编排与 HTTPS 入口 |
 
-以上是设计基线，尚未全部实现；依赖版本与具体 API 会在开发阶段通过 Context7 和官方文档核对。
+以上后端部分是设计基线，尚未实现；开发时依赖版本与具体 API 会通过 Context7 和官方文档核对。
 
 ## Monorepo 结构
 
@@ -78,8 +101,9 @@ openspec/    产品行为规格和实施任务
 - [x] 系统架构图、数据模型和 OpenSpec 实施计划
 - [x] 黑色点阵无限画布及主要页面的视觉参考图
 - [x] 前端 UI 技术与分阶段实现计划
-- [ ] 完成 Agent 任务树、审批、结果审阅和画布保存状态原型
-- [ ] 开始 UI 前端调试
+- [x] 完成前端页面与无限画布交互原型首版
+- [ ] 补齐 Agent 失败/重试、保存失败/冲突与恢复等边界状态原型
+- [x] 按参考图进行桌面/窄屏视觉走查并修正窄屏画布初始视口
 - [ ] 实现账户、画布、素材、Agent 和单机部署
 
 ## 文档导航
@@ -98,7 +122,7 @@ openspec/    产品行为规格和实施任务
 
 ## 常见问题
 
-**这是可以直接使用的在线画布吗？** 还不是。仓库目前以需求、架构和原型设计为主，应用代码与在线 Demo 尚未完成。
+**这是可以直接使用的在线画布吗？** 还不是。仓库包含可运行的前端交互原型；账户、画布、素材和 Agent 都是前端演示状态，没有 API、云端保存或在线 Demo。
 
 **MVP 会调用 AI 生图或改图接口吗？** 暂时不会。接口由用户后续提供后，才会按真实 API 文档单独规划实现。
 
@@ -110,7 +134,7 @@ openspec/    产品行为规格和实施任务
 
 ## English Summary
 
-Online Canvas Platform is a portfolio project for an AI-assisted infinite canvas web application. The planned MVP combines a dark dotted canvas, private image assets, personal projects, and bounded multi-agent workflows with human review. The target frontend stack is React, TypeScript, Vite, React Router, Tailwind CSS, shadcn/ui, Lucide React, and Konva; the backend plan uses FastAPI, LangGraph, PostgreSQL, Redis/ARQ, and MinIO. The repository currently contains product and architecture documentation plus visual references; the application is not implemented yet. The project is prepared for job applications and released under the MIT License.
+Online Canvas Platform is a portfolio project for an AI-assisted infinite canvas web application. Its first runnable frontend prototype includes a dark dotted canvas workspace, project home, image asset library, username-based auth screens, account settings, and user-configurable agent settings. The current UI uses local fixtures and does not connect to an API, database, MinIO, or model provider. The planned backend stack is FastAPI, LangGraph, PostgreSQL, Redis/ARQ, and MinIO. Prepared for job applications and released under the MIT License.
 
 ## License
 

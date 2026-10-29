@@ -1,0 +1,24 @@
+# JavaScript
+node_modules/
+.next/
+dist/
+.turbo/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Private planning note; product decisions are maintained in docs/ and OpenSpec.
+/自己产品备忘录.md

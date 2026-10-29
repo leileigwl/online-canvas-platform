@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+<title id="title">在线画布平台个人版 MVP 架构</title>
+<desc id="desc">React Konva 浏览器经 HTTPS 调用单机服务器中的 Caddy、FastAPI、PostgreSQL、Redis ARQ、LangGraph Worker 和 MinIO；Worker 调用用户配置的模型服务。</desc>
+<defs>
+  <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#53657d"/></marker>
+  <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3478f6"/></marker>
+  <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#139b90"/></marker>
+  <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b5cc7"/></marker>
+  <style>
+    text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#16263d}
+    .title{font-size:34px;font-weight:700}.sub{font-size:16px;fill:#53657d}.zone{font-size:19px;font-weight:700}
+    .cardTitle{font-size:18px;font-weight:700}.body{font-size:14px;fill:#53657d}.small{font-size:12px;fill:#53657d}.label{font-size:13px;font-weight:600;fill:#40536d}
+    .card{fill:#fff;stroke:#ccd6e2;stroke-width:2}.blue{fill:#eef4ff;stroke:#7da6f7}.teal{fill:#e9f8f5;stroke:#65b9ae}.purple{fill:#f5efff;stroke:#b597e8}.amber{fill:#fff7e6;stroke:#e9bd64}
+    .line{fill:none;stroke:#53657d;stroke-width:2.5;marker-end:url(#arrow)}.lineBlue{fill:none;stroke:#3478f6;stroke-width:2.5;marker-end:url(#arrowBlue)}.lineTeal{fill:none;stroke:#139b90;stroke-width:2.5;marker-end:url(#arrowTeal)}.linePurple{fill:none;stroke:#8b5cc7;stroke-width:2.5;marker-end:url(#arrowPurple)}
+  </style>
+</defs>
+<rect width="1600" height="980" fill="#f5f7fb"/>
+<text x="56" y="62" class="title">在线无限画布平台 · MVP 架构</text>
+<text x="58" y="92" class="sub">个人画布 · 多 Agent 自主创作 · 单服务器 Docker Compose</text>
+
+<rect x="55" y="160" width="285" height="220" rx="18" class="card blue"/>
+<text x="82" y="200" class="zone">浏览器</text>
+<rect x="82" y="225" width="230" height="112" rx="12" class="card"/>
+<text x="101" y="262" class="cardTitle">React + TypeScript</text>
+<text x="101" y="288" class="body">账户、项目、Agent 面板</text>
+<text x="101" y="313" class="body">Konva 无限画布编辑器</text>
+
+<rect x="395" y="145" width="935" height="715" rx="22" fill="#edf1f6" stroke="#bac6d4" stroke-width="2"/>
+<text x="425" y="185" class="zone">单台云服务器 · Docker Compose 私有网络</text>
+
+<rect x="465" y="220" width="235" height="72" rx="12" class="card amber"/>
+<text x="488" y="250" class="cardTitle">Caddy</text><text x="488" y="273" class="body">HTTPS 反向代理</text>
+
+<rect x="465" y="350" width="270" height="148" rx="14" class="card blue"/>
+<text x="490" y="387" class="cardTitle">FastAPI</text>
+<text x="490" y="414" class="body">身份、项目、画布、素材 API</text>
+<text x="490" y="439" class="body">Agent Run / 权限 / revision</text>
+<text x="490" y="471" class="small">HTTPS API + SSE 进度</text>
+
+<rect x="820" y="350" width="260" height="148" rx="14" class="card purple"/>
+<text x="845" y="387" class="cardTitle">Python Worker</text>
+<text x="845" y="414" class="body">ARQ + LangGraph</text>
+<text x="845" y="439" class="body">Coordinator + 专业 Agent</text>
+<text x="845" y="471" class="small">计划、并行、审批、恢复</text>
+
+<rect x="1160" y="355" width="155" height="135" rx="14" class="card purple"/>
+<text x="1181" y="390" class="cardTitle">模型服务</text>
+<text x="1181" y="417" class="body">用户配置的</text>
+<text x="1181" y="441" class="body">OpenAI API</text>
+<text x="1181" y="466" class="small">BYOK</text>
+
+<rect x="465" y="625" width="250" height="145" rx="14" class="card"/>
+<text x="490" y="662" class="cardTitle">PostgreSQL</text>
+<text x="490" y="690" class="body">用户 / 项目 / 素材元数据</text>
+<text x="490" y="714" class="body">画布 JSONB + revision</text>
+<text x="490" y="744" class="small">Agent runs / tasks / versions</text>
+
+<rect x="785" y="625" width="210" height="145" rx="14" class="card amber"/>
+<text x="815" y="662" class="cardTitle">Redis + ARQ</text>
+<text x="815" y="690" class="body">长任务排队和重试</text>
+<text x="815" y="714" class="body">不是业务状态存储</text>
+<text x="815" y="744" class="small">任务由 Worker 消费</text>
+
+<rect x="1060" y="625" width="255" height="145" rx="14" class="card teal"/>
+<text x="1090" y="662" class="cardTitle">MinIO 私有存储</text>
+<text x="1090" y="690" class="body">用户图片和生成结果</text>
+<text x="1090" y="714" class="body">私有 bucket / 持久卷</text>
+<text x="1090" y="744" class="small">需异机备份</text>
+
+<path d="M340 270 L465 255" class="lineBlue"/><text x="365" y="247" class="label">HTTPS</text>
+<path d="M582 292 L582 350" class="lineBlue"/>
+<path d="M735 408 L820 408" class="linePurple"/><text x="740" y="390" class="small">任务 / 状态</text>
+<path d="M600 498 L600 625" class="line"/><text x="610" y="565" class="small">业务 / 画布保存</text>
+<path d="M710 477 C760 540 830 550 870 625" class="line"/><text x="740" y="565" class="small">入队</text>
+<path d="M890 498 L890 625" class="linePurple"/><text x="900" y="565" class="small">消费任务</text>
+<path d="M1080 400 L1160 420" class="linePurple"/><text x="1081" y="385" class="small">HTTPS / BYOK</text>
+<path d="M735 465 C850 555 1010 560 1120 625" class="lineTeal"/><text x="935" y="555" class="small">素材文件读写</text>
+<path d="M1050 470 C1115 510 1175 530 1190 625" class="lineTeal"/>
+
+<rect x="55" y="890" width="1510" height="54" rx="12" fill="#fff" stroke="#d5dde7"/>
+<text x="82" y="924" class="body">边界：PostgreSQL 保存画布 JSONB/任务状态；Redis 只排队；MinIO 存图片；Agent 写入必须经 API 校验用户所有权和 revision。</text>
+</svg>

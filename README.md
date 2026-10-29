@@ -47,7 +47,9 @@
 
 | 层 | 规划技术 | 主要职责 |
 |---|---|---|
-| Web 前端 | React、TypeScript、Konva | 无限画布、素材面板和 Agent 操作界面 |
+| Web 前端 | React、TypeScript、Vite、React Router 7 | 页面路由和应用壳 |
+| UI 组件 | Tailwind CSS 4、shadcn/ui、Lucide React | 暗色设计令牌、可访问控件和线性图标 |
+| 画布 | react-konva / Konva | 无限画布中的图像、文字、形状和变换 |
 | API | Python、FastAPI | 用户会话、项目、画布、素材和 Agent API |
 | Agent 编排 | LangGraph | Coordinator 任务图、专业 Agent、审批与恢复 |
 | 后台任务 | Redis、ARQ | 长任务排队、重试和取消信号 |
@@ -75,6 +77,7 @@ openspec/    产品行为规格和实施任务
 - [x] 产品需求、MVP 边界和技术选型文档
 - [x] 系统架构图、数据模型和 OpenSpec 实施计划
 - [x] 黑色点阵无限画布及主要页面的视觉参考图
+- [x] 前端 UI 技术与分阶段实现计划
 - [ ] 完成 Agent 任务树、审批、结果审阅和画布保存状态原型
 - [ ] 开始 UI 前端调试
 - [ ] 实现账户、画布、素材、Agent 和单机部署
@@ -86,6 +89,7 @@ openspec/    产品行为规格和实施任务
 | [产品说明](docs/PRODUCT.md) | 目标用户、产品边界和核心流程 |
 | [MVP PRD](docs/01-product/PRD.md) | 用户故事、范围和验收标准 |
 | [产品与交互设计](docs/02-design/product-design.md) | 页面结构、交互状态和多 Agent 体验 |
+| [前端 UI 开发计划](docs/02-design/frontend-ui-plan.md) | 视觉令牌、页面布局、前端选型和实现顺序 |
 | [原型文档](docs/02-design/prototypes/README.md) | 原型参考图、页面说明和待补状态 |
 | [系统架构](docs/02-design/system-architecture.md) | 系统组件、数据流和架构图 |
 | [技术选型 ADR](docs/03-decisions/ADR-0001-monorepo-and-stack.md) | Monorepo、技术栈及取舍 |
@@ -106,7 +110,7 @@ openspec/    产品行为规格和实施任务
 
 ## English Summary
 
-Online Canvas Platform is a portfolio project for an AI-assisted infinite canvas web application. The planned MVP combines a dark dotted canvas, private image assets, personal projects, and bounded multi-agent workflows with human review. The target stack is React, TypeScript, Konva, FastAPI, LangGraph, PostgreSQL, Redis/ARQ, and MinIO, with a single-server Docker Compose deployment. The repository currently contains product and architecture documentation plus visual references; the application is not implemented yet. The project is prepared for job applications and released under the MIT License.
+Online Canvas Platform is a portfolio project for an AI-assisted infinite canvas web application. The planned MVP combines a dark dotted canvas, private image assets, personal projects, and bounded multi-agent workflows with human review. The target frontend stack is React, TypeScript, Vite, React Router, Tailwind CSS, shadcn/ui, Lucide React, and Konva; the backend plan uses FastAPI, LangGraph, PostgreSQL, Redis/ARQ, and MinIO. The repository currently contains product and architecture documentation plus visual references; the application is not implemented yet. The project is prepared for job applications and released under the MIT License.
 
 ## License
 

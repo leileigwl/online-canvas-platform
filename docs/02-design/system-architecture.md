@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart TB
-  Browser[React + TypeScript + Konva 浏览器]
+  Browser[React + TypeScript + DOM UI + Konva 浏览器]
   subgraph Host[单台云服务器 / Docker Compose]
     Proxy[Caddy HTTPS 反向代理]
     API[FastAPI REST API]
@@ -134,7 +134,9 @@ erDiagram
 
 ## 7. 技术资料
 
-- 画布：Konva React。多用户实时协作不在 MVP，因此暂不引入 Yjs 或 Hocuspocus。
+- 前端视觉与页面实施顺序见[前端 UI 开发计划](frontend-ui-plan.md)。React + Konva 足以实现原型中的画布；页面导航和 UI 基础控件由 React Router、Tailwind、shadcn/ui 与 Lucide 补齐。
+- 画布：Konva React。点阵底图用 CSS radial-gradient 同步 viewport；普通面板、工具栏、表单、弹层仍是 HTML/CSS。多用户实时协作不在 MVP，因此暂不引入 Yjs 或 Hocuspocus。
 - 多 Agent：LangGraph 任务图和 PostgreSQL checkpoint；具体依赖版本在实现前核验。
 - Context7 查询记录（2026-10-29，`/websites/langchain_oss_python_langgraph`）：LangGraph 使用 State/Nodes/Edges 表达流程，独立节点可并行；`interrupt` 与 checkpointer 可暂停并恢复审批。见[Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、[Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)、[Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)。
+- Context7 前端文档查阅（2026-10-29）：React Konva `/konvajs/react-konva`、Tailwind CSS `/tailwindlabs/tailwindcss.com`、shadcn/ui `/websites/ui_shadcn`、React Router `/remix-run/react-router`。Vite SPA 采用 BrowserRouter，Tailwind 用官方 Vite 插件与 CSS theme tokens，组件主题自定义。详见[ADR-0001](../03-decisions/ADR-0001-monorepo-and-stack.md)。
 - 技术选择和替代方案见 [ADR-0001](../03-decisions/ADR-0001-monorepo-and-stack.md)。

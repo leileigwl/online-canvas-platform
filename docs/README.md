@@ -17,6 +17,7 @@
 
 - [需求关系图](02-design/requirements-map.md)：需求树、依赖和数据映射。
 - [产品与交互设计说明](02-design/product-design.md)：页面清单、单人画布、保存状态和 Agent 流程，用于原型重画和 UI 调试。
+- [前端 UI 开发计划](02-design/frontend-ui-plan.md)：原型视觉拆解、补充 UI 技术栈、页面布局和分阶段实现顺序。
 - [生图与改图 API 接入预案](02-design/image-provider-integration.md)：后续用户提供接口后再定协议并开发，当前仅记录接入边界。
 - [系统架构图、时序图和数据关系图](02-design/system-architecture.md)
 - [参考项目拆解](02-design/reference-projects.md)：Jaaz 与 AI 修图项目的可借鉴部分。

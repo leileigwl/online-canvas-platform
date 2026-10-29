@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart LR
-  Browser[React + Konva] -->|HTTPS API / SSE| Proxy[Caddy]
+  Browser[React + DOM UI + Konva] -->|HTTPS API / SSE| Proxy[Caddy]
   Proxy --> API[FastAPI]
   API --> PG[(PostgreSQL：JSONB 画布 + revision)]
   API --> MinIO[(MinIO 图片对象)]
@@ -23,7 +23,8 @@ flowchart LR
 | 范围 | MVP 选择 | 主要职责 |
 |---|---|---|
 | Monorepo | pnpm workspace + Turborepo；Python 用 uv | 统一 TS 工作区与 Python 服务入口 |
-| Web | React + TypeScript + Vite | 单页应用、账户、项目和编辑器 |
+| Web | React + TypeScript + Vite + React Router 7 | SPA 页面、账户、项目和编辑器路由 |
+| UI | Tailwind CSS 4 + shadcn/ui + Lucide React | 暗色设计令牌、可访问的 DOM 控件和图标 |
 | 画布 | react-konva / Konva | 图片、文字、形状、变换和命中检测 |
 | API | FastAPI + SQLAlchemy + Alembic | 身份、项目、素材和 Agent REST API |
 | 多 Agent | LangGraph Python | Coordinator 任务图、子 Agent、审批和断点恢复 |
@@ -51,7 +52,7 @@ flowchart LR
 ## Monorepo 模块
 
 ```text
-apps/web        React、账户/项目、Konva 画布和 Agent UI
+apps/web        React Router 页面、Tailwind/shadcn UI、Konva 画布和 Agent UI
 apps/api        FastAPI 身份、项目、素材、Agent API
 apps/worker     ARQ + LangGraph 多 Agent 和长任务
 packages/canvas-core   画布文档类型、命令和校验
@@ -60,4 +61,4 @@ packages/ui            共用界面组件
 infra                 Compose、Caddy、数据库和备份配置
 ```
 
-完整部署/数据关系见[系统架构](02-design/system-architecture.md)，选型取舍见[ADR-0001](03-decisions/ADR-0001-monorepo-and-stack.md)。
+前端视觉与实现顺序见[前端 UI 开发计划](02-design/frontend-ui-plan.md)；完整部署/数据关系见[系统架构](02-design/system-architecture.md)，选型取舍见[ADR-0001](03-decisions/ADR-0001-monorepo-and-stack.md)。

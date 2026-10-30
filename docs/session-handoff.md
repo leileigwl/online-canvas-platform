@@ -1,10 +1,10 @@
 # Session handoff
 
-> 最后更新：2026-10-29
+> 最后更新：2026-10-30
 
 ## 当前阶段
 
-MVP 收敛为个人在线无限画布和多 Agent 创作；产品/技术文档已同步。`apps/web` 已有可运行的首版前端原型：首页、无限画布、素材库、用户名登录注册、账户设置和 Agent 设置。页面目前使用本地 fixture 与前端状态，尚未连接 API、数据库、MinIO 或真实模型。
+MVP 收敛为个人在线无限画布和多 Agent 创作；`apps/web` 已有首页、无限画布、素材库、账户和 Agent 设置原型。最新画布采用右侧唯一 Agent 对话窗口、底部紧凑图像生成栏和点击展开的图像参数面板。页面使用本地 fixture 与前端状态，未连接 API、数据库、MinIO 或真实图像生成服务。
 
 ## 已确认范围
 
@@ -15,6 +15,7 @@ MVP 收敛为个人在线无限画布和多 Agent 创作；产品/技术文档�
 - 用户配置 OpenAI 兼容模型，按角色映射；API Key 服务端加密。
 - 图片素材通过 MinIO 私有存储；PostgreSQL 保存业务数据、画布 JSONB/revision 和 Agent 状态；Redis + ARQ 执行长任务。
 - 生图和改图接口由用户后续提供；当前只记录[接入预案](02-design/image-provider-integration.md)，不开发调用。
+- 右侧 Agent 对话是唯一聊天窗口；底部图像生成栏单独管理提示词、模型和质量/尺寸/分辨率/比例/透明背景/张数等本地界面参数。选中对象只作为 Agent 上下文，不打开第二个聊天框。
 - **多人同时编辑同一画布暂不纳入 MVP。**项目邀请、成员角色、在线光标、Yjs/Hocuspocus 实时同步一并延期。
 
 ## 设计入口
@@ -29,13 +30,21 @@ MVP 收敛为个人在线无限画布和多 Agent 创作；产品/技术文档�
 
 - 当前 change：`platform-foundation`，schema `spec-driven`。
 - 能力规格：identity-projects、canvas-editing、asset-storage、agent-orchestration。
-- 当前任务清单的设计基线和 1.3 前端页面/桌面窄屏走查已完成；1.2 的保存冲突、失败恢复等原型状态仍待补齐。4.1 的前端交互底座已有画笔、颜色、框选/多选、图层显隐等交互，但 CanvasDocument、云端保存与 revision 仍未实现。后端账号/项目、JSONB 画布、MinIO 和多 Agent 服务尚未开始。不包含多人实时协作。
+- 当前任务清单的设计基线和 1.3 前端页面走查已完成；画布 Agent 对话与底部图像参数栏已按最新确认的界面调整。保存冲突、失败恢复等原型状态仍待补齐。4.1 前端交互底座已有画笔、颜色、框选/多选、图层显隐等交互，但 CanvasDocument、云端保存与 revision 仍未实现。后端账号/项目、JSONB 画布、MinIO 和多 Agent 服务尚未开始。不包含多人实时协作。
 
 ## 下一步
 
-1. 继续对照 `docs/02-design/prototypes/` 参考图检查窄屏 Agent/素材抽屉和多对象拖动细节。
-2. 按需求补 Agent 失败/重试和保存冲突状态；当前并行计划、提案与画布改动均为本地演示。
-3. UI 结构稳定后按 OpenSpec tasks 实现 API、Worker、CanvasDocument 和单机部署。
+1. 补齐画布保存冲突、失败恢复及 Agent 失败/重试原型状态；当前并行计划、提案与画布改动均为本地演示。
+2. 原型状态完成走查后按 OpenSpec tasks 实现 API、Worker、CanvasDocument 和单机部署。
+
+## 2026-10-30 前端更新
+
+- 按用户确认的界面方向，将 Agent 输入移入右侧 Agent 对话面板；画布对象按钮只将图片或文本框加入该对话上下文，不再显示对象聊天浮层。
+- 新增底部紧凑图像生成栏：模型选择、参考图选择/导入、质量、宽高、16 倍数对齐、分辨率、宽高比、透明背景及生成数量。点击参数摘要后，设置面板在画布范围内打开并可滚动。
+- 生图提交只显示本地原型提示，不调用真实模型/API；服务端、资产持久化和真实生图仍未接入。
+- 已同步 PRODUCT、PRD、产品设计、前端 UI 计划、原型说明和 OpenSpec。
+- 验证：`pnpm --filter @canvas/web typecheck`、`pnpm --filter @canvas/web build` 通过；`openspec validate --all --no-interactive` 通过（拆分长规格后再次验证）；`git diff --check` 通过。Playwright 浏览器预览核对了桌面 1440×900 和窄屏 390×844，设置浮层留在画布区；对象上下文进入右侧 Agent 输入区，没有额外弹窗。Chrome DevTools MCP 当前已有浏览器实例占用，改用 Playwright 预览。
+- 本地 Vite 预览运行于 `http://localhost:5173/canvas/spring`。
 
 ## 本次验证
 
@@ -66,3 +75,4 @@ MVP 收敛为个人在线无限画布和多 Agent 创作；产品/技术文档�
 - Chrome DevTools MCP 在 1440×1000 和 390×844 核对：底部输入始终可见，画布工具栏和缩放控件停留在输入区上方，右侧面板没有输入框；提交目标后右侧显示阶段/结果；附件选择器点图会加入输入区附件。Chrome console error/warn 为空。`pnpm --filter @canvas/web typecheck`、`pnpm --filter @canvas/web build`、`openspec validate --all --no-interactive` 和 `git diff --check` 通过。原型交互与模型调用、图片生成 API 仍未连接。
 - 2026-10-29：继续按更新的 `自己产品备忘录.md` 修改前端和文档。工具栏移至画布顶部并只保留选择箭头、手形、撤销/重做；桌面底部对话框缩至约屏宽三分之一居中，窄屏接近全宽，缩放控件在窄屏移至对话框上方。Agent 设置左侧导航栏收窄至 168–190px；点击画布图片可打开图片专属 AI 输入，提交时自动附加该图片并显示 Agent 演示流程。对话导入图与演示生成结果默认标为临时，点击“保存到资产”后加入原型内存素材库；仍不接入真实 API、模型或 MinIO。
 - Chrome DevTools MCP 实际操作验证：单图输入提交后右侧显示对应目标，图片作为附件出现；模拟输出默认显示“临时内容”，保存后素材库可见该图。临时导入先显示“· 临时”，保存后转成素材库可选项。桌面 1440×1000 与窄屏 390×844 截图检查：顶部工具栏稳定、对话框居中、窄屏缩放在输入框上方、图片聊天浮层没有横向溢出；浏览器 console error/warn 为空。`pnpm --filter @canvas/web typecheck`、`pnpm --filter @canvas/web build`、`openspec validate --all --no-interactive` 与 `git diff --check` 通过。该 UI 检查不代表真实上传/生成服务已接入；上传文件工具因浏览器工具工作区路径限制未直接读取 `docs/image.png`，用页面内生成的图片 File 事件验证临时附件状态。
+- 2026-10-29：按最新备忘录将画布选择/平移/撤销/重做工具栏移到“会话草稿”同一顶栏；左侧图层区添加按钮可放置文本框，文本内容可在对象对话浮层编辑。图片和文本框均可从对象旁发起 AI 对话，文本框标题/内容随请求作为上下文；对象对话支持导入临时图片，发送后在底部输入区可移除或保存到资产。选中框改为 1px 蓝线和 7px 控制点；对象对话浮层收窄并移除底部说明小字。已同步 PRODUCT、PRD、产品设计、前端计划、原型说明和 OpenSpec；Context7 已按 Konva 10.9.0 官方文档记录 Transformer 样式参数。`pnpm --filter @canvas/web typecheck`、`pnpm exec openspec validate --all --no-interactive` 和 `git diff --check` 通过；本轮未执行生产构建或浏览器走查。项目仍是本地演示，不接入真实生图/改图 API、MinIO 或模型。

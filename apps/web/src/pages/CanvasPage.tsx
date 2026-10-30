@@ -1,8 +1,8 @@
 import Konva from "konva";
 import {
   ArrowRight, Check, CircleHelp, Cloud, Copy,
-  Eye, EyeOff, Hand, ImagePlus, Leaf, Maximize2, Minimize2, MousePointer2, MoreHorizontal, Palette, Plus, Redo2,
-  Save, Settings2, Sparkles, Square, Undo2, Upload, X,
+  Eye, EyeOff, Hand, ImagePlus, Leaf, Maximize2, Minimize2, MousePointer2, MoreHorizontal, Palette, Redo2,
+  Settings2, Sparkles, Square, Undo2, Upload, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, FormEvent, RefObject, SetStateAction } from "react";
@@ -33,14 +33,7 @@ type CanvasDraft = {
   redoStack: CanvasItem[][];
 };
 
-type ObjectChatContext =
-  | { kind: "image"; image: SampleAsset; isSavedAsset: boolean }
-  | { kind: "text"; title: string; content: string };
-
-type AgentObjectContextRequest = {
-  id: string;
-  context: ObjectChatContext;
-};
+type AgentGoalRequest = { id: string; prompt: string };
 
 type ImageGenerationSettings = {
   quality: string;
@@ -353,39 +346,27 @@ function CanvasStage({ items, setItems, tool, setTool, selectedIds, setSelectedI
   );
 }
 
-function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, onSaveAsset, assetLibrary, initialReferenceIds, proposalHistorySignal, selectedObjectContext }: {
+function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, onSaveAsset, references, onRemoveReference, onClearReferences, proposalHistorySignal, submittedGoal }: {
   open: boolean;
   compact: boolean;
   onToggleCompact: () => void;
   onClose: () => void;
   onApplyProposal: (proposalId: string) => void;
   onSaveAsset: (asset: SampleAsset) => void;
-  assetLibrary: SampleAsset[];
-  initialReferenceIds: string[];
+  references: SampleAsset[];
+  onRemoveReference: (id: string) => void;
+  onClearReferences: () => void;
   proposalHistorySignal: { action: "undo" | "redo"; proposalId: string | null; revision: number };
-  selectedObjectContext: AgentObjectContextRequest | null;
+  submittedGoal: AgentGoalRequest | null;
 }) {
-  const [goal, setGoal] = useState("");
-  const [sent, setSent] = useState("基于这个灵感板，帮我生成更完整的春季护肤品品牌视觉方案，包括主视觉、色彩搭配和 3 个延展场景。");
-  const [showAttachmentPicker, setShowAttachmentPicker] = useState(false);
+  const [sent, setSent] = useState("");
   const [showMenu, setShowMenu] = useState(false);
-  const [temporaryAttachments, setTemporaryAttachments] = useState<SampleAsset[]>([]);
   const [proposalImageSaved, setProposalImageSaved] = useState(false);
-  const [objectContext, setObjectContext] = useState<{ title: string; detail: string } | null>(null);
-  const [pendingObjectContext, setPendingObjectContext] = useState<{ title: string; detail: string } | null>(null);
-  const uploadInputRef = useRef<HTMLInputElement>(null);
   const [proposalReady, setProposalReady] = useState(false);
   const [proposalId, setProposalId] = useState<string>(() => crypto.randomUUID());
   const [review, setReview] = useState<"pending" | "applied" | "rejected">("pending");
   const [proposalApplied, setProposalApplied] = useState(false);
-  const [referenceLimitReached, setReferenceLimitReached] = useState(false);
-  const [references, setReferences] = useState<string[]>([]);
-  const referenceAssets = assetLibrary.filter((asset) => references.includes(asset.id));
   const hasConversation = Boolean(sent.trim());
-
-  useEffect(() => {
-    if (initialReferenceIds.length) setReferences((current) => [...new Set([...current, ...initialReferenceIds])].slice(0, 10));
-  }, [initialReferenceIds]);
 
   useEffect(() => {
     if (!proposalHistorySignal.revision || proposalHistorySignal.proposalId !== proposalId) return;
@@ -394,65 +375,24 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
   }, [proposalHistorySignal, proposalId]);
 
   useEffect(() => {
-    if (!selectedObjectContext) return;
-    const { context } = selectedObjectContext;
-    setPendingObjectContext(context.kind === "image"
-      ? { title: `画布图片：${context.image.name}`, detail: "这张图片会作为下一条 Agent 消息的参考对象。" }
-      : { title: `文本框：${context.title}`, detail: context.content || "（文本框为空）" });
-    setShowAttachmentPicker(false);
-    if (context.kind === "image") {
-      const { image, isSavedAsset } = context;
-      if (isSavedAsset) {
-        setReferences((current) => [...new Set([...current, image.id])].slice(0, 10));
-      } else {
-        setTemporaryAttachments((current) => current.some((asset) => asset.id === image.id) ? current : [...current, image]);
-      }
-    }
-  }, [selectedObjectContext?.id]);
-
-  function submitGoal(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!goal.trim()) return;
-    setSent(goal.trim());
-    setGoal("");
+    if (!submittedGoal) return;
+    setSent(submittedGoal.prompt);
     setReview("pending");
     setProposalApplied(false);
     setProposalImageSaved(false);
     setProposalId(crypto.randomUUID());
     setProposalReady(true);
-    setShowAttachmentPicker(false);
-    setObjectContext(pendingObjectContext);
-    setPendingObjectContext(null);
-  }
+  }, [submittedGoal?.id]);
 
-  function importTemporaryImages(files: FileList | null) {
-    if (!files?.length) return;
-    const additions = [...files].filter((file) => file.type.startsWith("image/")).map((file) => ({
-      id: crypto.randomUUID(), name: file.name, src: URL.createObjectURL(file), dimensions: "临时导入", recent: true,
-    }));
-    setTemporaryAttachments((current) => [...current, ...additions]);
-    if (uploadInputRef.current) uploadInputRef.current.value = "";
-  }
-
-  function saveTemporaryAttachment(asset: SampleAsset) {
-    onSaveAsset(asset);
-    setTemporaryAttachments((current) => current.filter((item) => item.id !== asset.id));
-    setReferences((current) => [...new Set([...current, asset.id])].slice(0, 10));
-  }
-
-  function toggleReference(id: string) {
-    setReferences((current) => {
-      if (current.includes(id)) {
-        setReferenceLimitReached(false);
-        return current.filter((item) => item !== id);
-      }
-      if (current.length >= 10) {
-        setReferenceLimitReached(true);
-        return current;
-      }
-      setReferenceLimitReached(false);
-      return [...current, id];
-    });
+  function clearConversation() {
+    setSent("");
+    onClearReferences();
+    setReview("pending");
+    setProposalApplied(false);
+    setProposalImageSaved(false);
+    setProposalReady(false);
+    setProposalId(crypto.randomUUID());
+    setShowMenu(false);
   }
 
   return (
@@ -460,49 +400,46 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
     <div className={`agent-panel-shell ${open ? "panel-open" : ""} ${compact ? "agent-panel-compact" : ""}`}>
     <aside className="editor-right-panel">
       {compact ? <div className="agent-compact-top"><span className="agent-logo"><Leaf size={16} /></span><button className="icon-button" aria-label="展开 Agent 面板" title="展开 Agent 面板" onClick={onToggleCompact}><Maximize2 size={16} /></button></div> : <>
-      <div className="right-panel-top"><div className="agent-title"><span className="agent-logo"><Leaf size={16} /></span><strong>AI Agent</strong><span className="beta-tag">Beta</span></div><button className="icon-button" aria-label="缩小 Agent 面板" title="缩小 Agent 面板" onClick={onToggleCompact}><Minimize2 size={16} /></button><button className="icon-button" aria-label="Agent 设置" onClick={() => window.location.assign("/settings/agent")}><Settings2 size={17} /></button><button className="icon-button" aria-label="更多 Agent 操作" onClick={() => setShowMenu((open) => !open)}><MoreHorizontal size={17} /></button><button className="icon-button" aria-label="关闭面板" onClick={onClose}><X size={17} /></button>{showMenu && <div className="agent-header-menu"><button onClick={() => { setSent(""); setGoal(""); setObjectContext(null); setPendingObjectContext(null); setReview("pending"); setProposalApplied(false); setProposalReady(false); setProposalId(crypto.randomUUID()); setShowMenu(false); }}>清空本次对话</button></div>}</div>
+      <div className="right-panel-top"><div className="agent-title"><span className="agent-logo"><Leaf size={16} /></span><strong>AI Agent</strong><span className="beta-tag">Beta</span></div><button className="icon-button" aria-label="缩小 Agent 面板" title="缩小 Agent 面板" onClick={onToggleCompact}><Minimize2 size={16} /></button><button className="icon-button" aria-label="Agent 设置" onClick={() => window.location.assign("/settings/agent")}><Settings2 size={17} /></button><button className="icon-button" aria-label="更多 Agent 操作" onClick={() => setShowMenu((open) => !open)}><MoreHorizontal size={17} /></button><button className="icon-button" aria-label="关闭面板" onClick={onClose}><X size={17} /></button>{showMenu && <div className="agent-header-menu"><button onClick={clearConversation}>清空本次对话</button></div>}</div>
       <div className="agent-scroll-content">
+        {references.length > 0 && <section className="agent-selected-references" aria-label="已选参考图片"><div className="agent-selected-references-heading"><strong>已选图片</strong><span>{references.length}</span></div><div className="agent-selected-reference-list">{references.map((asset) => <div className="agent-selected-reference" key={asset.id}><img src={asset.src} alt={asset.name} /><span title={asset.name}>{asset.name}</span><button type="button" aria-label={`移除参考图片 ${asset.name}`} title="移除参考图片" onClick={() => onRemoveReference(asset.id)}><X size={12} /></button></div>)}</div></section>}
         {hasConversation && <div className="agent-thread">
-          <div className="chat-bubble user-bubble">{objectContext && <div className="chat-object-context"><strong>{objectContext.title}</strong>{objectContext.detail && <span>{objectContext.detail}</span>}</div>}{sent}</div>
-          <div className="chat-answer"><span className="agent-avatar"><Leaf size={14} /></span><div><strong>Coordinator 已理解你的需求</strong><p>我会结合当前画布、选中的对象和已附加图片整理创作建议。这里展示的是前端交互演示，尚未调用真实生图或改图接口。</p></div></div>
+          <div className="chat-bubble user-bubble">{sent}</div>
+          <div className="chat-answer"><span className="agent-avatar"><Leaf size={14} /></span><div><strong>Coordinator 已理解你的需求</strong><p>我会结合当前画布和已选图片整理创作建议。这里展示的是前端交互演示，尚未调用真实生图或改图接口。</p></div></div>
         </div>}
-        <section className="task-card"><div className="task-card-head"><span><Sparkles size={14} />执行计划</span><small>(3/3)</small></div><div className="task-list">
+        {!hasConversation && references.length === 0 && <p className="agent-empty-state">从画布点击图片即可加入参考。提交创作目标后，这里会展示 Agent 的执行过程和结果。</p>}
+        {hasConversation && <section className="task-card"><div className="task-card-head"><span><Sparkles size={14} />执行计划</span><small>(3/3)</small></div><div className="task-list">
           <div className={`task-row ${hasConversation ? "task-done" : ""}`}><span className="task-state">{hasConversation ? <Check size={12} /> : "1"}</span><div><strong>解析画布内容</strong><small>{hasConversation ? "Coordinator · 提取风格、关键词和参考元素" : "等待创作目标"}</small></div></div>
           <div className={`task-row ${proposalReady ? "task-done" : hasConversation ? "task-running" : ""}`}><span className="task-state">{proposalReady ? <Check size={12} /> : hasConversation ? <i /> : "2"}</span><div><strong>生成视觉方案</strong><small>{proposalReady ? "Planner + Canvas Editor · 视觉方案已生成" : hasConversation ? "Planner + Canvas Editor · 正在生成主视觉和配色方案…" : "等待前序步骤完成"}</small></div></div>
           <div className={`task-row ${review === "applied" || review === "rejected" ? "task-done" : proposalReady ? "task-running" : ""}`}><span className="task-state">{review === "applied" || review === "rejected" ? <Check size={12} /> : proposalReady ? <i /> : "3"}</span><div><strong>输出结果</strong><small>{review === "applied" ? "Reviewer · 已接受并应用到画布" : review === "rejected" ? "Reviewer · 提案已拒绝" : proposalReady ? "Reviewer · 等待审阅画布修改" : "等待前序步骤完成"}</small></div></div>
-        </div>{proposalReady && <><div className="temporary-output-card"><img src="/assets/bloom.svg" alt="交互演示图片预览" /><div><strong>交互演示预览</strong><small>{proposalImageSaved ? "已保存到资产" : "模拟结果 · 临时内容"}</small></div><button disabled={proposalImageSaved} onClick={() => { onSaveAsset({ id: `generated-${proposalId}`, name: `生成预览-${proposalId.slice(0, 6)}.svg`, src: "/assets/bloom.svg", dimensions: "1024 × 1024", recent: true }); setProposalImageSaved(true); }}>{proposalImageSaved ? "已保存" : "保存到资产"}</button></div><div className="agent-result-inline"><div><strong>画布提案</strong><span>{review === "pending" ? "新增便签「视觉层级建议」" : review === "applied" ? "提案已加入画布，可撤销" : "本次提案已拒绝"}</span></div>{review === "pending" ? <div className="agent-result-actions"><button onClick={() => setReview("rejected")}>拒绝</button><button className="accept" onClick={() => { if (!proposalApplied) { onApplyProposal(proposalId); setProposalApplied(true); } setReview("applied"); }}>应用</button></div> : review === "rejected" && <button className="agent-result-retry" onClick={() => setReview("pending")}>重新查看</button>}</div></>}</section>
+        </div>{proposalReady && <><div className="temporary-output-card"><img src="/assets/bloom.svg" alt="交互演示图片预览" /><div><strong>交互演示预览</strong><small>{proposalImageSaved ? "已保存到资产" : "模拟结果 · 临时内容"}</small></div><button disabled={proposalImageSaved} onClick={() => { onSaveAsset({ id: `generated-${proposalId}`, name: `生成预览-${proposalId.slice(0, 6)}.svg`, src: "/assets/bloom.svg", dimensions: "1024 × 1024", recent: true }); setProposalImageSaved(true); }}>{proposalImageSaved ? "已保存" : "保存到资产"}</button></div><div className="agent-result-inline"><div><strong>画布提案</strong><span>{review === "pending" ? "新增便签「视觉层级建议」" : review === "applied" ? "提案已加入画布，可撤销" : "本次提案已拒绝"}</span></div>{review === "pending" ? <div className="agent-result-actions"><button onClick={() => setReview("rejected")}>拒绝</button><button className="accept" onClick={() => { if (!proposalApplied) { onApplyProposal(proposalId); setProposalApplied(true); } setReview("applied"); }}>应用</button></div> : review === "rejected" && <button className="agent-result-retry" onClick={() => setReview("pending")}>重新查看</button>}</div></>}</section>}
       </div>
       </>}
     </aside>
-      {!compact && <form className="agent-compose" onSubmit={submitGoal}>
-        <div className="agent-compose-inner">
-        {pendingObjectContext && <div className="agent-pending-context"><div><strong>{pendingObjectContext.title}</strong><span>{pendingObjectContext.detail}</span></div><button type="button" aria-label="移除选中对象上下文" onClick={() => setPendingObjectContext(null)}><X size={13} /></button></div>}
-        {referenceAssets.length > 0 || temporaryAttachments.length > 0 ? <div className="composer-attachments" aria-label="对话附件">{referenceAssets.map((asset) => <button className="composer-attachment" type="button" key={asset.id} title={`从对话中移除 ${asset.name}`} onClick={() => toggleReference(asset.id)}><img src={asset.src} alt={asset.name} /><span>{asset.name}</span><X size={12} /></button>)}{temporaryAttachments.map((asset) => <div className="composer-attachment composer-temp-attachment" key={asset.id}><img src={asset.src} alt={asset.name} /><span>{asset.name} · 临时</span><button type="button" aria-label={`保存 ${asset.name} 到资产`} title="保存到资产" onClick={() => saveTemporaryAttachment(asset)}><Save size={12} /></button><button type="button" aria-label={`移除 ${asset.name}`} onClick={() => setTemporaryAttachments((current) => current.filter((item) => item.id !== asset.id))}><X size={12} /></button></div>)}</div> : null}
-        <input ref={uploadInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => importTemporaryImages(event.target.files)} />
-        {showAttachmentPicker && <div className="composer-asset-picker"><div className="composer-picker-heading"><strong>选择素材</strong><button type="button" className="button button-quiet composer-upload-button" onClick={() => uploadInputRef.current?.click()}><Upload size={13} /> 导入临时图片</button><button type="button" className="icon-button" aria-label="关闭素材选择器" onClick={() => setShowAttachmentPicker(false)}><X size={14} /></button></div><div className="composer-picker-grid">{assetLibrary.map((asset) => <button type="button" className={`composer-picker-asset ${references.includes(asset.id) ? "selected" : ""}`} key={asset.id} onClick={() => toggleReference(asset.id)}><img src={asset.src} alt={asset.name} /><span>{asset.name}</span>{references.includes(asset.id) && <Check size={13} />}</button>)}</div>{referenceLimitReached && <small className="reference-limit-note">最多选择 10 张参考素材。</small>}<small className="temporary-import-note">导入图片会先作为临时附件；点击附件上的保存图标后才加入资产库。</small></div>}
-        <textarea value={goal} onChange={(event) => setGoal(event.target.value)} placeholder={pendingObjectContext ? "围绕选中对象描述你的想法…" : "和 Agent 继续对话…"} rows={3} aria-label="Agent 对话输入" />
-        <div className="agent-compose-actions"><button type="button" className={`icon-button ${showAttachmentPicker ? "attachment-active" : ""}`} onClick={() => setShowAttachmentPicker((visible) => !visible)} aria-label="添加对话附件" title="添加参考图片"><ImagePlus size={17} /></button><button type="submit" className="compose-send" aria-label="发送给 Agent"><ArrowRight size={16} /></button></div>
-        </div>
-      </form>}
     </div>
     </>
   );
 }
 
-function ImageGenerationBar({ assetLibrary }: { assetLibrary: SampleAsset[] }) {
+function ImageGenerationBar({ references, onRemoveReference, onSubmitPrompt, focusPromptRequest }: {
+  references: SampleAsset[];
+  onRemoveReference: (id: string) => void;
+  onSubmitPrompt: (prompt: string) => void;
+  focusPromptRequest: number;
+}) {
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState("gpt-image-2");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
-  const [referenceIds, setReferenceIds] = useState<string[]>([]);
-  const [temporaryReferences, setTemporaryReferences] = useState<SampleAsset[]>([]);
   const [notice, setNotice] = useState("");
   const [settings, setSettings] = useState<ImageGenerationSettings>({
     quality: "自动", width: 1024, height: 1024, alignTo16: true, resolution: "自动", ratio: "1:1", transparent: false, count: 3,
   });
   const composerRef = useRef<HTMLFormElement>(null);
-  const uploadRef = useRef<HTMLInputElement>(null);
-  const selectedReferences = assetLibrary.filter((asset) => referenceIds.includes(asset.id));
+  const promptRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (focusPromptRequest > 0) promptRef.current?.focus();
+  }, [focusPromptRequest]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -519,19 +456,6 @@ function ImageGenerationBar({ assetLibrary }: { assetLibrary: SampleAsset[] }) {
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [settingsOpen]);
-
-  function toggleReference(id: string) {
-    setReferenceIds((current) => current.includes(id) ? current.filter((entry) => entry !== id) : current.length < 10 ? [...current, id] : current);
-  }
-
-  function importReferences(files: FileList | null) {
-    if (!files?.length) return;
-    const additions = [...files].filter((file) => file.type.startsWith("image/")).map((file) => ({
-      id: crypto.randomUUID(), name: file.name, src: URL.createObjectURL(file), dimensions: "临时导入", recent: true,
-    }));
-    setTemporaryReferences((current) => [...current, ...additions]);
-    if (uploadRef.current) uploadRef.current.value = "";
-  }
 
   function updateDimension(key: "width" | "height", rawValue: string) {
     const parsed = Number(rawValue);
@@ -564,10 +488,10 @@ function ImageGenerationBar({ assetLibrary }: { assetLibrary: SampleAsset[] }) {
   function submitGeneration(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!prompt.trim()) return;
-    setNotice(`已记录 ${model} · ${settings.quality} · ${settings.width}×${settings.height} · ${settings.resolution} · ${settings.ratio} · ${settings.count} 张${settings.transparent ? " · 透明背景" : ""}。当前尚未接入生图服务。`);
+    onSubmitPrompt(prompt.trim());
+    setNotice(`已提交给 Agent · ${model} · ${settings.quality} · ${settings.width}×${settings.height} · ${settings.resolution} · ${settings.ratio} · ${settings.count} 张${references.length ? ` · ${references.length} 张参考图` : ""}${settings.transparent ? " · 透明背景" : ""}。当前仅展示本地流程，未调用生图服务。`);
     setPrompt("");
     setSettingsOpen(false);
-    setReferencePickerOpen(false);
   }
 
   const settingsSummary = `${settings.resolution} · ${settings.ratio} · ${settings.count} 张`;
@@ -575,8 +499,6 @@ function ImageGenerationBar({ assetLibrary }: { assetLibrary: SampleAsset[] }) {
   return (
     <form ref={composerRef} className="image-generation-dock" onSubmit={submitGeneration}>
       {notice && <div className="generation-notice" role="status"><span>{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
-      <input ref={uploadRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => importReferences(event.target.files)} />
-      {referencePickerOpen && <div className="generation-reference-picker"><div className="generation-picker-head"><strong>参考图片</strong><button type="button" className="button button-quiet" onClick={() => uploadRef.current?.click()}><Upload size={13} /> 导入图片</button><button type="button" aria-label="关闭参考图片选择器" onClick={() => setReferencePickerOpen(false)}><X size={13} /></button></div><div className="generation-picker-grid">{assetLibrary.map((asset) => <button type="button" key={asset.id} className={referenceIds.includes(asset.id) ? "selected" : ""} onClick={() => toggleReference(asset.id)}><img src={asset.src} alt="" /><span>{asset.name}</span>{referenceIds.includes(asset.id) && <Check size={13} />}</button>)}</div>{temporaryReferences.length > 0 && <div className="generation-temp-list">{temporaryReferences.map((asset) => <div className="generation-temp-item" key={asset.id}><img src={asset.src} alt="" /><span>{asset.name} · 临时</span><button type="button" aria-label={`移除 ${asset.name}`} onClick={() => setTemporaryReferences((current) => current.filter((entry) => entry.id !== asset.id))}><X size={12} /></button></div>)}</div>}<small>临时导入图片只作为本次参考，不会自动保存到资产库。</small></div>}
       {settingsOpen && <section className="image-settings-popover" role="dialog" aria-label="图像设置">
         <div className="image-settings-header"><div><strong>图像设置</strong><small>调整本次生成参数</small></div><button type="button" aria-label="关闭图像设置" onClick={() => setSettingsOpen(false)}><X size={15} /></button></div>
         <div className="image-settings-group"><span className="image-settings-label">质量</span><div className="quality-options">{qualityOptions.map((quality) => <button type="button" key={quality} className={settings.quality === quality ? "selected" : ""} aria-pressed={settings.quality === quality} onClick={() => setSettings((current) => ({ ...current, quality }))}>{quality}</button>)}</div></div>
@@ -586,11 +508,9 @@ function ImageGenerationBar({ assetLibrary }: { assetLibrary: SampleAsset[] }) {
         <div className="image-settings-footer"><span className="image-settings-label">透明背景</span><button type="button" className={`settings-switch ${settings.transparent ? "on" : ""}`} role="switch" aria-checked={settings.transparent} onClick={() => setSettings((current) => ({ ...current, transparent: !current.transparent }))}><span />{settings.transparent ? "开启" : "关闭"}</button></div>
         <div className="image-settings-group"><span className="image-settings-label">生成张数</span><div className="count-options">{Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <button type="button" key={count} className={settings.count === count ? "selected" : ""} aria-pressed={settings.count === count} onClick={() => setSettings((current) => ({ ...current, count }))}>{count}</button>)}</div></div>
       </section>}
-      <button type="button" className={`generation-reference-button ${referencePickerOpen ? "active" : ""}`} aria-label="添加参考图片" title="添加参考图片" aria-expanded={referencePickerOpen} onClick={() => { setSettingsOpen(false); setReferencePickerOpen((open) => !open); }}><ImagePlus size={17} />{referenceIds.length + temporaryReferences.length > 0 && <span>{referenceIds.length + temporaryReferences.length}</span>}</button>
-      {selectedReferences.slice(0, 2).map((asset) => <button type="button" className="generation-reference-thumb" key={asset.id} aria-label={`移除参考图片 ${asset.name}`} onClick={() => toggleReference(asset.id)}><img src={asset.src} alt="" /><X size={11} /></button>)}
-      {temporaryReferences.slice(0, 1).map((asset) => <button type="button" className="generation-reference-thumb temporary" key={asset.id} aria-label={`移除参考图片 ${asset.name}`} onClick={() => setTemporaryReferences((current) => current.filter((entry) => entry.id !== asset.id))}><img src={asset.src} alt="" /><X size={11} /></button>)}
-      <input className="generation-prompt" type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述生成或修改图片…" aria-label="图片生成提示词" />
-      <div className="generation-controls"><label className="generation-model"><span className="visually-hidden">生图模型</span><select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="flux-pro">Flux Pro</option><option value="imagen-4">Imagen 4</option></select><span aria-hidden="true">⌄</span></label><button type="button" className="generation-settings-trigger" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => { setReferencePickerOpen(false); setSettingsOpen((open) => !open); }}><Settings2 size={16} /><span>{settingsSummary}</span></button><button type="submit" className="generation-submit" aria-label="生成图片" title="生成图片" disabled={!prompt.trim()}><ArrowRight size={17} /></button></div>
+      {references.length > 0 && <div className="generation-reference-list" aria-label="已选参考图片">{references.map((reference) => <button type="button" className="generation-reference-thumb" key={reference.id} aria-label={`移除参考图片 ${reference.name}`} title={`移除参考图片 ${reference.name}`} onClick={() => onRemoveReference(reference.id)}><img src={reference.src} alt="" /><X size={11} /></button>)}</div>}
+      <input ref={promptRef} className="generation-prompt" type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述你的创作目标或图片修改…" aria-label="Agent 创作目标输入" />
+      <div className="generation-controls"><label className="generation-model"><span className="visually-hidden">生图模型</span><select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="flux-pro">Flux Pro</option><option value="imagen-4">Imagen 4</option></select><span aria-hidden="true">⌄</span></label><button type="button" className="generation-settings-trigger" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen((open) => !open)}><Settings2 size={16} /><span>{settingsSummary}</span></button><button type="submit" className="generation-submit" aria-label="提交给 Agent" title="提交给 Agent" disabled={!prompt.trim()}><ArrowRight size={17} /></button></div>
     </form>
   );
 }
@@ -610,11 +530,13 @@ export function CanvasPage() {
   const [saved, setSaved] = useState(true);
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentCompact, setAgentCompact] = useState(false);
-  const [agentObjectContext, setAgentObjectContext] = useState<AgentObjectContextRequest | null>(null);
   const [proposalHistorySignal, setProposalHistorySignal] = useState<{ action: "undo" | "redo"; proposalId: string | null; revision: number }>({ action: "undo", proposalId: null, revision: 0 });
   const agentProposalItemIdRef = useRef<string | null>(null);
   const [agentAssets, setAgentAssets] = useState<SampleAsset[]>([]);
-  const [initialReferenceIds, setInitialReferenceIds] = useState<string[]>([]);
+  const [generationReferences, setGenerationReferences] = useState<SampleAsset[]>([]);
+  const [generationFocusRequest, setGenerationFocusRequest] = useState(0);
+  const [submittedGoal, setSubmittedGoal] = useState<AgentGoalRequest | null>(null);
+  const imageImportInputRef = useRef<HTMLInputElement>(null);
   const agentAssetLibrary = useMemo(() => [...sampleAssets, ...agentAssets.filter((asset) => !sampleAssets.some((sample) => sample.id === asset.id))], [agentAssets]);
   const selectedChatItem = selectedIds.length === 1 ? items.find((item) => item.id === selectedIds[0] && ["image", "note"].includes(item.type)) : undefined;
   const title = canvasId === "spring-board" || canvasId === "spring" ? "春季灵感板" : "未命名画布";
@@ -673,7 +595,7 @@ export function CanvasPage() {
       y: 130 + (itemsRef.current.length % 4) * 24, width: 185, height: 145, src: asset.src, title: asset.name,
     };
     updateCanvasItems((current) => [...current, item]);
-    setSelectedIds([item.id]);
+    selectCanvasItems([item.id]);
     setTool("select");
   }
 
@@ -682,27 +604,67 @@ export function CanvasPage() {
     setAgentAssets((current) => current.some((item) => item.id === asset.id) ? current : [asset, ...current]);
   }
 
-  function selectCanvasItems(ids: string[]) {
-    setSelectedIds(ids);
+  function submitAgentGoal(prompt: string) {
+    setSubmittedGoal({ id: crypto.randomUUID(), prompt });
+    setAgentOpen(true);
+    setAgentCompact(false);
   }
 
-  function openSelectedObjectInAgent() {
-    if (!selectedChatItem) return;
-    const context: ObjectChatContext = selectedChatItem.type === "image"
-      ? (() => {
-        const savedAsset = agentAssetLibrary.find((asset) => asset.src === selectedChatItem.src);
-        const image: SampleAsset = savedAsset ?? {
-          id: `canvas-image-${selectedChatItem.id}`,
-          name: selectedChatItem.title,
-          src: selectedChatItem.src ?? "",
-          dimensions: "画布图片",
-          recent: true,
-        };
-        return { kind: "image", image, isSavedAsset: Boolean(savedAsset) };
-      })()
-      : { kind: "text", title: selectedChatItem.title, content: selectedChatItem.content ?? "" };
-    setAgentObjectContext({ id: crypto.randomUUID(), context });
-    setAgentOpen(true);
+  function removeGenerationReference(id: string) {
+    setGenerationReferences((current) => current.filter((reference) => reference.id !== id));
+  }
+
+  function selectCanvasItems(ids: string[]) {
+    setSelectedIds(ids);
+    if (ids.length !== 1) return;
+    const selectedItem = itemsRef.current.find((item) => item.id === ids[0]);
+    if (selectedItem?.type !== "image" || !selectedItem.src) return;
+    const savedAsset = agentAssetLibrary.find((asset) => asset.src === selectedItem.src);
+    const reference: SampleAsset = savedAsset ?? {
+      id: `canvas-image-${selectedItem.id}`,
+      name: selectedItem.title,
+      src: selectedItem.src,
+      dimensions: "画布图片",
+      recent: true,
+    };
+    setGenerationReferences((current) => current.some((item) => item.id === reference.id) || current.length >= 10 ? current : [...current, reference]);
+    setGenerationFocusRequest((current) => current + 1);
+  }
+
+  async function importCanvasImages(files: File[]) {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) return;
+    const firstIndex = itemsRef.current.length;
+    const imported = await Promise.all(imageFiles.map((file, index) => new Promise<CanvasItem | null>((resolve) => {
+      const src = URL.createObjectURL(file);
+      const image = new window.Image();
+      image.onload = () => {
+        const naturalWidth = image.naturalWidth || 185;
+        const naturalHeight = image.naturalHeight || 145;
+        const scale = Math.min(1, 260 / naturalWidth, 210 / naturalHeight);
+        resolve({
+          id: crypto.randomUUID(), type: "image", x: 120 + ((firstIndex + index) % 3) * 30,
+          y: 120 + ((firstIndex + index) % 3) * 28, width: Math.max(1, Math.round(naturalWidth * scale)),
+          height: Math.max(1, Math.round(naturalHeight * scale)), src, title: file.name,
+        });
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(src);
+        resolve(null);
+      };
+      image.src = src;
+    })));
+    const additions = imported.filter((item): item is CanvasItem => item !== null);
+    if (!additions.length) return;
+    updateCanvasItems((current) => [...current, ...additions]);
+    setSelectedIds([additions[additions.length - 1].id]);
+    setTool("select");
+    const importedReferences = additions.map((item) => ({
+      id: `canvas-image-${item.id}`, name: item.title, src: item.src ?? "",
+      dimensions: `${item.width} × ${item.height}`, recent: true,
+    }));
+    setGenerationReferences((current) => [...current, ...importedReferences].slice(-10));
+    setGenerationFocusRequest((current) => current + 1);
   }
 
   useEffect(() => {
@@ -725,7 +687,7 @@ export function CanvasPage() {
       const assets = JSON.parse(raw) as SampleAsset[];
       if (assets.length) {
         setAgentAssets(assets);
-        setInitialReferenceIds(assets.map((asset) => asset.id));
+        setGenerationReferences((current) => [...current, ...assets].slice(-10));
         setAgentOpen(true);
       }
     } catch {
@@ -748,11 +710,24 @@ export function CanvasPage() {
 
   return (
     <div className="editor-page">
+      <input
+        ref={imageImportInputRef}
+        className="visually-hidden"
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          void importCanvasImages(files);
+        }}
+      />
       <header className="editor-topbar">
         <div className="editor-brand-area"><Link className="editor-logo" to="/"><Leaf size={18} /></Link><span className="editor-wordmark">FlowCanvas</span><span className="editor-vdivider" /><Link className="breadcrumb-link" to="/">我的画布</Link><span className="breadcrumb-slash">/</span><span className="canvas-title">{title}</span></div>
         <div className="editor-center-tools">
           <div className="canvas-toolbar" role="toolbar" aria-label="画布工具">
             {toolOptions.map(({ id, label, icon: Icon }) => <button key={id} className={`canvas-tool ${tool === id ? "active" : ""}`} title={label} aria-label={label} onClick={() => setTool(id)}><Icon size={18} /></button>)}
+            <button type="button" className="canvas-tool" aria-label="导入图片到画布并添加为生图参考" title="导入图片" onClick={() => imageImportInputRef.current?.click()}><Upload size={17} /></button>
             <span className="toolbar-divider" />
             <button className="canvas-tool" aria-label="撤销" title="撤销" onClick={undo} disabled={!undoStack.current.length}><Undo2 size={17} /></button><button className="canvas-tool" aria-label="重做" title="重做" onClick={redo} disabled={!redoStack.current.length}><Redo2 size={17} /></button>
           </div>
@@ -763,7 +738,7 @@ export function CanvasPage() {
       <div className={`editor-workspace ${agentCompact ? "agent-compact" : ""}`}>
         <aside className="editor-left-panel">
           <div className="left-nav-tabs"><button className="left-nav-active"><Square size={17} />画布</button><Link to={`/assets?canvas=${encodeURIComponent(canvasId)}`}><ImagePlus size={17} />素材</Link></div>
-          <div className="layer-section"><div className="panel-section-heading"><span>图层</span><button className={`icon-button ${tool === "text" ? "active" : ""}`} aria-label="添加文本框" title="添加文本框" aria-pressed={tool === "text"} onClick={() => setTool("text")}><Plus size={17} /></button></div><label className="layer-search"><SearchIcon /><input placeholder="搜索图层…" /></label>
+          <div className="layer-section"><div className="panel-section-heading"><span>图层</span></div><label className="layer-search"><SearchIcon /><input placeholder="搜索图层…" /></label>
             <div className="canvas-layer-list">{items.map((item) => <div className={`canvas-layer-row ${selectedIds.includes(item.id) ? "selected" : ""}`} key={item.id}><button className="layer-select" onClick={() => selectCanvasItems([item.id])}><span className="layer-chevron">›</span>{item.type === "image" ? <img src={item.src} alt="" /> : <span className="layer-color-chip">{item.type === "note" ? "▧" : "◧"}</span>}<span className="layer-name">{item.title}</span></button><button className="layer-visibility" aria-label={`${item.visible === false ? "显示" : "隐藏"} ${item.title}`} onClick={() => { if (item.visible !== false) setSelectedIds((current) => current.filter((id) => id !== item.id)); updateCanvasItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, visible: entry.visible === false } : entry)); }}>{item.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}</button></div>)}</div>
           </div>
           <div className="left-panel-bottom"><Link to="/settings/agent"><Settings2 size={17} />设置</Link><button><CircleHelp size={17} />帮助</button></div>
@@ -774,14 +749,13 @@ export function CanvasPage() {
           {tool === "brush" && <div className="brush-palette" role="group" aria-label="画笔颜色">{["#dce6aa", "#b9e98f", "#f0eee5", "#d79373", "#93a9bd"].map((color) => <button key={color} className={brushColor === color ? "brush-color active" : "brush-color"} style={{ backgroundColor: color }} aria-label={`画笔颜色 ${color}`} aria-pressed={brushColor === color} onClick={() => setBrushColor(color)} />)}</div>}
           {selectedIds.length > 0 && <div className="selection-inspector">
             <span>选中对象</span><strong>{selectedChatItem?.title ?? (selectedIds.length === 1 ? items.find((item) => item.id === selectedIds[0])?.title : `${selectedIds.length} 个对象`)}</strong>
-            {selectedChatItem && <button className="selection-chat-trigger" aria-label="在 Agent 对话中使用选中对象" title="在 Agent 对话中使用选中对象" onClick={openSelectedObjectInAgent}><Sparkles size={14} /></button>}
             {canColorSelection && <div className="object-color-control"><button aria-label="对象配色" title="对象配色" aria-expanded={objectPaletteOpen} onClick={() => setObjectPaletteOpen((open) => !open)}><Palette size={14} /></button>{objectPaletteOpen && <div className="object-color-menu" role="group" aria-label="对象配色"><span>填充颜色</span>{objectPaletteColors.map((color) => { const selectedColor = selectedIds.every((id) => { const item = items.find((entry) => entry.id === id); const currentColor = item?.color ?? (item?.type === "shape" ? "#b9e98f" : item?.type === "connector" ? "#d6d8d0" : "#dce6aa"); return currentColor === color; }); return <button key={color} className="object-color-swatch" style={{ backgroundColor: color }} aria-label={`设置颜色 ${color}`} aria-pressed={selectedColor} onClick={() => { updateCanvasItems((current) => current.map((item) => selectedIds.includes(item.id) ? { ...item, color } : item)); setObjectPaletteOpen(false); }} />; })}</div>}</div>}
             <span className="inspector-divider" /><button aria-label="复制对象" onClick={() => { const copies = itemsRef.current.filter((item) => selectedIds.includes(item.id)).map((item) => ({ ...item, id: crypto.randomUUID(), x: item.x + 24, y: item.y + 24, title: `${item.title} 副本` })); updateCanvasItems((current) => [...current, ...copies]); setSelectedIds(copies.map((item) => item.id)); }}><Copy size={14} /></button><button aria-label="删除对象" onClick={() => { updateCanvasItems((current) => current.filter((item) => !selectedIds.includes(item.id))); setSelectedIds([]); }}><X size={15} /></button>
           </div>}
-          <ImageGenerationBar assetLibrary={agentAssetLibrary} />
+          <ImageGenerationBar references={generationReferences} onRemoveReference={removeGenerationReference} onSubmitPrompt={submitAgentGoal} focusPromptRequest={generationFocusRequest} />
           <div className="canvas-help-hint"><span>空格 + 拖动</span> 平移画布 <span className="hint-dot">·</span> <span>滚轮</span> 缩放</div>
         </main>
-        <AgentPanel open={agentOpen} compact={agentCompact} onToggleCompact={() => setAgentCompact((value) => !value)} onClose={() => setAgentOpen(false)} assetLibrary={agentAssetLibrary} initialReferenceIds={initialReferenceIds} selectedObjectContext={agentObjectContext} proposalHistorySignal={proposalHistorySignal} onSaveAsset={saveAssetFromAgent} onApplyProposal={(id) => { agentProposalItemIdRef.current = id; updateCanvasItems((current) => [...current, { id, type: "note", x: 330, y: 135, width: 190, height: 130, title: "视觉层级建议", content: "· 主图作为视觉焦点\n· 采用自然绿与暖米色\n· 保持留白和轻盈感" }]); }} />
+        <AgentPanel open={agentOpen} compact={agentCompact} onToggleCompact={() => setAgentCompact((value) => !value)} onClose={() => setAgentOpen(false)} references={generationReferences} onRemoveReference={removeGenerationReference} onClearReferences={() => setGenerationReferences([])} submittedGoal={submittedGoal} proposalHistorySignal={proposalHistorySignal} onSaveAsset={saveAssetFromAgent} onApplyProposal={(id) => { agentProposalItemIdRef.current = id; updateCanvasItems((current) => [...current, { id, type: "note", x: 330, y: 135, width: 190, height: 130, title: "视觉层级建议", content: "· 主图作为视觉焦点\n· 采用自然绿与暖米色\n· 保持留白和轻盈感" }]); }} />
       </div>
       <div className="editor-toast"><span className="toast-dot" />{currentTool?.label}工具已选中 <button onClick={() => setSaved(true)}>保存演示状态</button></div>
     </div>

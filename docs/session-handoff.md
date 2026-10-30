@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-MVP 收敛为个人在线无限画布和多 Agent 创作；`apps/web` 已有首页、无限画布、素材库、账户和 Agent 设置原型。最新画布采用右侧唯一 Agent 对话窗口、底部紧凑图像生成栏和点击展开的图像参数面板。页面使用本地 fixture 与前端状态，未连接 API、数据库、MinIO 或真实图像生成服务。
+MVP 收敛为个人在线无限画布和多 Agent 创作；`apps/web` 已有首页、无限画布、素材库、账户和 Agent 设置原型。最新画布在底部提供唯一目标输入栏，右侧 Agent 面板只展示任务过程、结果审阅和已选图片；点击画布图片会自动加入参考图。页面使用本地 fixture 与前端状态，未连接 API、数据库、MinIO 或真实图像生成服务。
 
 ## 已确认范围
 
@@ -15,7 +15,7 @@ MVP 收敛为个人在线无限画布和多 Agent 创作；`apps/web` 已有首�
 - 用户配置 OpenAI 兼容模型，按角色映射；API Key 服务端加密。
 - 图片素材通过 MinIO 私有存储；PostgreSQL 保存业务数据、画布 JSONB/revision 和 Agent 状态；Redis + ARQ 执行长任务。
 - 生图和改图接口由用户后续提供；当前只记录[接入预案](02-design/image-provider-integration.md)，不开发调用。
-- 右侧 Agent 对话是唯一聊天窗口；底部图像生成栏单独管理提示词、模型和质量/尺寸/分辨率/比例/透明背景/张数等本地界面参数。选中对象只作为 Agent 上下文，不打开第二个聊天框。
+- Agent 目标只从画布底部提交；右侧面板只显示目标过程、结果审阅和已选图片，不提供第二个输入框或“添加素材”弹层。点击画布图片自动加入右侧和底部参考列表；图片导入后显示在画布并加入参考栏。图像参数仍为本地界面状态。
 - **多人同时编辑同一画布暂不纳入 MVP。**项目邀请、成员角色、在线光标、Yjs/Hocuspocus 实时同步一并延期。
 
 ## 设计入口
@@ -45,6 +45,25 @@ MVP 收敛为个人在线无限画布和多 Agent 创作；`apps/web` 已有首�
 - 已同步 PRODUCT、PRD、产品设计、前端 UI 计划、原型说明和 OpenSpec。
 - 验证：`pnpm --filter @canvas/web typecheck`、`pnpm --filter @canvas/web build` 通过；`openspec validate --all --no-interactive` 通过（拆分长规格后再次验证）；`git diff --check` 通过。Playwright 浏览器预览核对了桌面 1440×900 和窄屏 390×844，设置浮层留在画布区；对象上下文进入右侧 Agent 输入区，没有额外弹窗。Chrome DevTools MCP 当前已有浏览器实例占用，改用 Playwright 预览。
 - 本地 Vite 预览运行于 `http://localhost:5173/canvas/spring`。
+
+## 2026-10-30 备忘录 bug 修复
+
+- 清空 Agent 对话时同时移除消息、执行计划、提案结果和对话附件；已应用到画布的操作仍保留。
+- 选中画布图片时将其设为底部图像生成栏的当前参考图并聚焦提示词输入；不打开对象专属聊天窗口。
+- 移除底部图像生成栏的参考图片选择/导入面板；本地图片导入移到顶栏手形工具旁，导入后放到画布并将最新选中图片设为生图参考。
+- 验证：`pnpm --filter @canvas/web typecheck`、`pnpm --filter @canvas/web build`、`openspec validate --all --no-interactive`、`git diff --check` 通过。
+- 备忘录附带的 `image*.png` 仍为工作区未跟踪文件，未加入本次代码变更。
+- 本地 Vite 预览继续运行于 `http://localhost:5173/canvas/spring`。
+
+## 2026-10-30 备忘录交互调整
+
+- 移除右侧 Agent 输入框、素材添加按钮和素材选择弹层；底部输入栏现在提交目标并触发右侧流程展示。
+- 点击画布图片会自动加入底部和右侧参考图列表；顶栏导入的图片放入画布并加入参考列表，支持在任一列表移除。
+- 移除左侧图层标题旁的加号。
+- 同步更新 PRODUCT、PRD、交互/前端计划、原型说明和 OpenSpec；图片生成、Agent 执行和保存仍为本地前端演示。
+- 验证：`pnpm --filter @canvas/web typecheck`、`pnpm --filter @canvas/web build`、`pnpm exec openspec validate --all --no-interactive`、`git diff --check` 均通过；`http://localhost:5173/canvas/spring` 返回 HTTP 200。
+- 当前备忘录截图 `image.png`、`image-1.png`、`image-2.png` 保留为未跟踪文件，不加入代码提交范围。
+- 本地 Vite 预览继续运行于 `http://localhost:5173/canvas/spring`。
 
 ## 本次验证
 

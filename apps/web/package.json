@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@canvas/api-client": "workspace:*",
+    "@canvas/canvas-core": "workspace:*",
     "clsx": "^2.1.1",
     "konva": "^10.9.0",
     "lucide-react": "^1.63.0",

@@ -4,24 +4,45 @@ import { useNavigate, useSearchParams } from "react-router";
 import { AppHeader } from "../components/AppHeader";
 import { getSavedAssets } from "../lib/asset-store";
 import { sampleAssets, type SampleAsset } from "../lib/samples";
+import { api, ApiError, type Asset } from "@canvas/api-client";
 
 type AssetTab = "all" | "recent" | "favorite";
+
+function toSampleAsset(asset: Asset): SampleAsset {
+  return {
+    id: asset.id,
+    name: asset.name,
+    src: asset.src,
+    dimensions: `${asset.width} × ${asset.height}`,
+    favorite: asset.favorite,
+    recent: true,
+  };
+}
 
 export function AssetsPage() {
   const [tab, setTab] = useState<AssetTab>("all");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [assets, setAssets] = useState<SampleAsset[]>(() => [...getSavedAssets(), ...sampleAssets]);
+  const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const objectUrls = useRef<string[]>([]);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const canvasId = searchParams.get("canvas") || "spring-board";
 
   useEffect(() => {
-    const releaseObjectUrls = () => objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
-    window.addEventListener("pagehide", releaseObjectUrls);
-    return () => window.removeEventListener("pagehide", releaseObjectUrls);
+    let active = true;
+    api.listAssets().then((records) => {
+      if (!active) return;
+      const remoteAssets = records.map(toSampleAsset);
+      setAssets((current) => [...remoteAssets, ...current.filter((asset) => !remoteAssets.some((remote) => remote.id === asset.id))]);
+    }).catch((cause) => {
+      if (active && !(cause instanceof ApiError && cause.status === 401)) {
+        setError(cause instanceof ApiError ? cause.message : "无法连接素材服务端。");
+      }
+    });
+    return () => { active = false; };
   }, []);
 
   const visibleAssets = useMemo(() => assets.filter((asset) => {
@@ -37,16 +58,20 @@ export function AssetsPage() {
     });
   }
 
-  function handleUpload(files: FileList | null) {
+  async function handleUpload(files: FileList | null) {
     if (!files?.length) return;
-    const additions = [...files].filter((file) => file.type.startsWith("image/")).map((file, index) => {
-      const src = URL.createObjectURL(file);
-      objectUrls.current.push(src);
-      return { id: `local-${Date.now()}-${index}`, name: file.name, src, dimensions: "本地预览", recent: true };
-    });
-    setAssets((current) => [...additions, ...current]);
-    setSelected((current) => new Set([...current, ...additions.map((asset) => asset.id)]));
-    if (inputRef.current) inputRef.current.value = "";
+    setUploading(true);
+    setError("");
+    try {
+      const additions = await Promise.all([...files].filter((file) => file.type.startsWith("image/")).map(async (file) => toSampleAsset(await api.uploadAsset(file))));
+      setAssets((current) => [...additions, ...current]);
+      setSelected((current) => new Set([...current, ...additions.map((asset) => asset.id)]));
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "图片上传失败，请确认 API 和文件格式后重试。");
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
   }
 
   function addAssetsToCanvas(selectedAssets: SampleAsset[]) {
@@ -71,10 +96,11 @@ export function AssetsPage() {
             <div><h1>我的素材</h1><span className="asset-total">{assets.length} 个图片素材</span></div>
             <div className="asset-actions-top">
               <label className="asset-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索素材名称、描述或标签…" /></label>
-              <button className="button button-light upload-button" onClick={() => inputRef.current?.click()}><Upload size={17} /> 上传素材</button>
+              <button className="button button-light upload-button" disabled={uploading} onClick={() => inputRef.current?.click()}><Upload size={17} />{uploading ? "正在上传…" : "上传素材"}</button>
               <input ref={inputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => handleUpload(event.target.files)} />
             </div>
           </div>
+          {error && <p className="form-error" role="alert">{error}</p>}
 
           <div className="asset-tabs" role="tablist" aria-label="素材筛选">
             <button className={tab === "all" ? "asset-tab active" : "asset-tab"} onClick={() => setTab("all")}>全部图片</button>

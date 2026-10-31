@@ -14,6 +14,12 @@ importers:
 
   apps/web:
     dependencies:
+      '@canvas/api-client':
+        specifier: workspace:*
+        version: link:../../packages/api-client
+      '@canvas/canvas-core':
+        specifier: workspace:*
+        version: link:../../packages/canvas-core
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -63,6 +69,14 @@ importers:
       vite:
         specifier: ^8.3.5
         version: 8.3.5(@types/node@26.6.6)(jiti@2.7.0)
+
+  packages/api-client:
+    dependencies:
+      '@canvas/canvas-core':
+        specifier: workspace:*
+        version: link:../canvas-core
+
+  packages/canvas-core: {}
 
 packages:
 

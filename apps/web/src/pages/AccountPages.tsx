@@ -1,7 +1,8 @@
 import { ArrowRight, Eye, EyeOff, KeyRound, Leaf, LockKeyhole, ShieldCheck, UserRound } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
+import { api, ApiError } from "@canvas/api-client";
 import { AppHeader, Wordmark } from "../components/AppHeader";
 
 function AuthArtwork() {
@@ -42,20 +43,33 @@ function PasswordField({ label = "密码", placeholder = "请输入密码", name
 export function LoginPage() {
   const navigate = useNavigate();
   const [message, setMessage] = useState("");
-  function submit(event: FormEvent<HTMLFormElement>) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setMessage("原型登录已完成，将进入个人画布。");
-    window.setTimeout(() => navigate("/"), 700);
+    const form = new FormData(event.currentTarget);
+    setError("");
+    setBusy(true);
+    try {
+      await api.login(String(form.get("username") ?? ""), String(form.get("password") ?? ""));
+      setMessage("登录成功，正在打开个人画布。");
+      navigate("/");
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "无法连接服务端，请确认 API 已启动。");
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <AuthFrame>
       <div className="auth-heading"><h1>欢迎回来</h1><p>登录你的 FlowCanvas 账户，继续在画布上创作。</p></div>
       <form className="auth-form" onSubmit={submit}>
-        <label className="form-field"><span>用户名</span><span className="field-shell"><UserRound size={17} /><input autoComplete="username" placeholder="请输入用户名" required /></span></label>
-        <PasswordField />
+        <label className="form-field"><span>用户名</span><span className="field-shell"><UserRound size={17} /><input name="username" autoComplete="username" placeholder="请输入用户名" required /></span></label>
+        <PasswordField name="password" />
         <div className="auth-options"><label className="check-label"><input type="checkbox" defaultChecked /><span>记住登录状态</span></label><span className="disabled-recovery">忘记密码？暂不支持找回</span></div>
-        <button className="button button-light auth-submit" type="submit">登录</button>
+        <button className="button button-light auth-submit" type="submit" disabled={busy}>{busy ? "正在登录…" : "登录"}</button>
         {message && <p className="form-success"><ShieldCheck size={15} />{message}</p>}
+        {error && <p className="form-error" role="alert">{error}</p>}
       </form>
       <div className="auth-switch"><span>还没有账户？</span><Link to="/register">注册 <ArrowRight size={14} /></Link></div>
       <div className="auth-legal">用户名与密码由你自行保管 · 暂不提供邮箱找回</div>
@@ -67,7 +81,8 @@ export function RegisterPage() {
   const navigate = useNavigate();
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  function submit(event: FormEvent<HTMLFormElement>) {
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     if (form.get("password") !== form.get("confirm-password")) {
@@ -76,18 +91,26 @@ export function RegisterPage() {
       return;
     }
     setError("");
-    setMessage("本地原型账户已创建。");
-    window.setTimeout(() => navigate("/"), 700);
+    setBusy(true);
+    try {
+      await api.register(String(form.get("username") ?? ""), String(form.get("password") ?? ""));
+      setMessage("账户已创建，正在打开你的画布空间。");
+      navigate("/");
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "无法连接服务端，请确认 API 已启动。");
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <AuthFrame>
       <div className="auth-heading"><h1>创建你的画布空间</h1><p>用一个用户名开始整理灵感与素材。</p></div>
       <form className="auth-form" onSubmit={submit}>
-        <label className="form-field"><span>用户名</span><span className="field-shell"><UserRound size={17} /><input autoComplete="username" placeholder="设置一个用户名" minLength={3} maxLength={24} pattern="[A-Za-z0-9_]{3,24}" title="请输入 3–24 个字母、数字或下划线" required /></span><small>3–24 个字符，可使用字母、数字和下划线</small></label>
+        <label className="form-field"><span>用户名</span><span className="field-shell"><UserRound size={17} /><input name="username" autoComplete="username" placeholder="设置一个用户名" minLength={3} maxLength={24} pattern="[A-Za-z0-9_]{3,24}" title="请输入 3–24 个字母、数字或下划线" required /></span><small>3–24 个字符，可使用字母、数字和下划线</small></label>
         <PasswordField name="password" label="设置密码" placeholder="至少 8 位字符" />
         <PasswordField name="confirm-password" label="确认密码" placeholder="再次输入密码" />
         <label className="check-label terms-check"><input type="checkbox" required /><span>我已阅读并同意服务条款与隐私说明</span></label>
-        <button className="button button-light auth-submit" type="submit">创建账户</button>
+        <button className="button button-light auth-submit" type="submit" disabled={busy}>{busy ? "正在创建…" : "创建账户"}</button>
         {message && <p className="form-success"><ShieldCheck size={15} />{message}</p>}
         {error && <p className="form-error" role="alert">{error}</p>}
       </form>
@@ -98,7 +121,54 @@ export function RegisterPage() {
 }
 
 export function AccountPage() {
+  const navigate = useNavigate();
   const [saved, setSaved] = useState(false);
+  const [username, setUsername] = useState("");
+  const [error, setError] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+
+  useEffect(() => {
+    api.me().then((user) => setUsername(user.username)).catch((cause) => {
+      if (cause instanceof ApiError && cause.status === 401) navigate("/login");
+      else setError(cause instanceof ApiError ? cause.message : "无法连接服务端。");
+    });
+  }, [navigate]);
+
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setError("");
+    try {
+      await api.changePassword(String(form.get("current_password") ?? ""), String(form.get("new_password") ?? ""));
+      setSaved(true);
+      setError("密码已更新，请使用新密码重新登录。");
+      await api.logout();
+      navigate("/login");
+    } catch (cause) {
+      setSaved(false);
+      setError(cause instanceof ApiError ? cause.message : "密码更新失败，请重试。");
+    }
+  }
+
+  async function deleteAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setDeleteError("");
+    setDeleteBusy(true);
+    try {
+      await api.deleteAccount(
+        String(form.get("delete-username") ?? ""),
+        String(form.get("delete-password") ?? ""),
+      );
+      navigate("/register");
+    } catch (cause) {
+      setDeleteError(cause instanceof ApiError ? cause.message : "账户注销失败，请重试。");
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
   return (
     <div className="settings-page dotted-page">
       <AppHeader />
@@ -108,16 +178,32 @@ export function AccountPage() {
           <nav className="settings-nav" aria-label="设置导航"><button className="settings-nav-item active"><UserRound size={17} />个人资料</button><button className="settings-nav-item"><KeyRound size={17} />密码与安全</button><Link className="settings-nav-item" to="/settings/agent"><Leaf size={17} />Agent 设置</Link></nav>
           <section className="settings-card">
             <div className="settings-card-heading"><div><h2>登录信息</h2><p>用户名用于登录你的 FlowCanvas 账户。</p></div><span className="status-pill"><span />账户正常</span></div>
-            <label className="form-field"><span>用户名</span><span className="field-shell"><UserRound size={17} /><input defaultValue="canvas-maker" /></span></label>
+            <label className="form-field"><span>用户名</span><span className="field-shell"><UserRound size={17} /><input value={username} readOnly /></span></label>
             <div className="settings-divider" />
             <div className="settings-card-heading"><div><h2>修改密码</h2><p>修改密码后，需要使用新密码重新登录。</p></div></div>
-            <PasswordField label="当前密码" placeholder="输入当前密码" />
-            <PasswordField label="新密码" placeholder="输入至少 8 位的新密码" />
-            <button className="button button-light settings-save" onClick={() => setSaved(true)}>保存账户设置</button>
-            {saved && <p className="form-success"><ShieldCheck size={15} />设置已保存（界面原型）。</p>}
+            <form onSubmit={changePassword}>
+              <PasswordField name="current_password" label="当前密码" placeholder="输入当前密码" />
+              <PasswordField name="new_password" label="新密码" placeholder="输入至少 8 位的新密码" />
+              <button className="button button-light settings-save" type="submit">保存账户设置</button>
+            </form>
+            {saved && <p className="form-success"><ShieldCheck size={15} />密码已更新。</p>}
+            {error && <p className="form-error" role="alert">{error}</p>}
           </section>
         </div>
-        <div className="danger-zone"><div><strong>注销账户</strong><p>注销后将按数据保留规则处理你的项目与素材。</p></div><button className="button button-danger" onClick={() => window.alert("账户注销为静态界面原型，尚未连接后端。")}>注销账户</button></div>
+        <div className="danger-zone">
+          <div><strong>注销账户</strong><p>账户、项目和个人素材将被删除，且无法恢复。</p></div>
+          {!deleteOpen ? (
+            <button className="button button-danger" onClick={() => setDeleteOpen(true)}>注销账户</button>
+          ) : (
+            <form className="danger-confirm-form" onSubmit={deleteAccount}>
+              <label className="form-field"><span>确认用户名</span><input className="text-field" name="delete-username" autoComplete="username" required /></label>
+              <PasswordField name="delete-password" label="当前密码" placeholder="输入当前密码" />
+              <button className="button button-quiet" type="button" disabled={deleteBusy} onClick={() => { setDeleteOpen(false); setDeleteError(""); }}>取消</button>
+              <button className="button button-danger" type="submit" disabled={deleteBusy}>{deleteBusy ? "正在注销…" : "确认永久注销"}</button>
+              {deleteError && <p className="form-error" role="alert">{deleteError}</p>}
+            </form>
+          )}
+        </div>
       </main>
     </div>
   );

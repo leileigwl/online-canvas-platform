@@ -1,15 +1,59 @@
 import { ArrowRight, ArrowUpRight, Ellipsis, FileUp, ImagePlus, Plus, Send, Sparkles } from "lucide-react";
 import { useState } from "react";
+import { useEffect } from "react";
 import { Link, useNavigate } from "react-router";
 import { AppHeader } from "../components/AppHeader";
 import { sampleProjects } from "../lib/samples";
+import { api, ApiError } from "@canvas/api-client";
+
+type HomeProject = { id: string; title: string; updated: string; art: string; image: string; canvasId: string };
+
+function formatUpdated(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "刚刚修改" : `最近修改 · ${date.toLocaleString("zh-CN", { hour12: false })}`;
+}
 
 export function HomePage() {
   const navigate = useNavigate();
   const [goal, setGoal] = useState("");
+  const [projects, setProjects] = useState<HomeProject[]>(sampleProjects.map((project) => ({ ...project, canvasId: project.id })));
+  const [signedIn, setSignedIn] = useState(false);
+  const [error, setError] = useState("");
 
-  function startCanvas() {
-    navigate("/canvas/spring-board");
+  useEffect(() => {
+    let active = true;
+    api.listProjects().then(async (records) => {
+      const grouped = await Promise.all(records.map(async (project) => ({ project, canvases: await api.listCanvases(project.id) })));
+      if (!active) return;
+      const boards = grouped.flatMap(({ project, canvases }) => canvases.map((canvas, index) => ({
+        id: canvas.id,
+        title: canvas.name || project.name,
+        updated: formatUpdated(canvas.updated_at),
+        art: ["art-bloom", "art-mountain", "art-brand"][index % 3],
+        image: ["/assets/bloom.svg", "/assets/mountain.svg", "/assets/skincare.svg"][index % 3],
+        canvasId: canvas.id,
+      })));
+      setProjects(boards);
+      setSignedIn(true);
+    }).catch((cause) => {
+      if (!active) return;
+      if (cause instanceof ApiError && cause.status === 401) setSignedIn(false);
+      else setError(cause instanceof ApiError ? cause.message : "无法连接服务端，请确认 API 已启动。");
+    });
+    return () => { active = false; };
+  }, []);
+
+  async function startCanvas() {
+    if (!signedIn) {
+      navigate("/login");
+      return;
+    }
+    try {
+      const canvas = await api.createCanvas("未命名画布");
+      navigate(`/canvas/${canvas.id}`);
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "无法创建画布，请重试。");
+    }
   }
 
   return (
@@ -26,6 +70,7 @@ export function HomePage() {
             <button className="prompt-send" type="submit" aria-label="开始创作"><Send size={17} /></button>
           </form>
           <button className="button button-light hero-create" onClick={startCanvas}><Plus size={19} /> 新建画布</button>
+          {error && <p className="form-error" role="alert">{error}</p>}
         </section>
 
         <section className="recent-section">
@@ -34,9 +79,9 @@ export function HomePage() {
             <button className="text-link" onClick={startCanvas}>查看全部 <ArrowRight size={15} /></button>
           </div>
           <div className="project-grid">
-            {sampleProjects.map((project) => (
+            {projects.map((project) => (
               <article className="project-card" key={project.id}>
-                <Link to={`/canvas/${project.id}`} className={`project-art ${project.art}`} aria-label={`打开${project.title}`}>
+                <Link to={`/canvas/${project.canvasId}`} className={`project-art ${project.art}`} aria-label={`打开${project.title}`}>
                   <img src={project.image} alt="" />
                   <div className="art-caption"><span>{project.id === "spring" ? "Natural\nSkincare" : project.id === "story" ? "Scene 01\n雨夜 · 消息" : "SORA"}</span></div>
                   {project.id === "spring" && <div className="art-swatch-row"><i /><i /><i /><i /></div>}

@@ -2,6 +2,7 @@ import type { CanvasSnapshot, CanvasDocument, CanvasViewport } from "@canvas/can
 
 export type User = { id: string; username: string };
 export type Project = { id: string; name: string; updated_at: string };
+export type CanvasVersion = { revision: number; created_at: string; schema_version: number; object_count: number; is_current: boolean };
 export type Asset = {
   id: string;
   name: string;
@@ -10,18 +11,38 @@ export type Asset = {
   width: number;
   height: number;
   favorite: boolean;
+  temporary: boolean;
   src: string;
   created_at: string;
 };
-export type AgentTask = { id: string; role: string; sequence: number; status: string; output: Record<string, unknown> | null; error: string | null };
+export type ImageGenerationInput = {
+  prompt: string;
+  reference_asset_ids: string[];
+  model: string;
+  quality: string;
+  width: number;
+  height: number;
+  align_to_16: boolean;
+  resolution: string;
+  aspect_ratio: string;
+  transparent: boolean;
+  count: number;
+};
+export type ImageGenerationResult = { status: "succeeded"; images: Asset[] };
+export type AgentTask = { id: string; role: string; sequence: number; task_key: string; title: string; depends_on: string[]; status: string; output: Record<string, unknown> | null; error: string | null };
 export type AgentRun = {
   id: string;
   canvas_id: string;
   goal: string;
   status: string;
   context_revision: number;
+  model_calls_used: number;
+  model_call_budget: number;
+  completion_tokens_used: number;
+  completion_usage_reports: number;
+  completion_tokens_per_call: number;
   summary: string | null;
-  proposal: { operations: Array<{ tool: string; params: Record<string, unknown> }>; applied?: boolean; rejected?: boolean } | null;
+  proposal: { operations: Array<{ tool: string; params: Record<string, unknown> }>; generated_assets?: Asset[]; applied?: boolean; rejected?: boolean } | null;
   error: string | null;
   tasks: AgentTask[];
   created_at: string;
@@ -68,17 +89,20 @@ export const api = {
   renameCanvas: (id: string, name: string) => request<CanvasSnapshot>(`/canvases/${id}`, { method: "PATCH", body: json({ name }) }),
   deleteCanvas: (id: string) => request<void>(`/canvases/${id}`, { method: "DELETE" }),
   saveCanvas: (id: string, base_revision: number, document: CanvasDocument, viewport: CanvasViewport) => request<CanvasSnapshot>(`/canvases/${id}`, { method: "PUT", body: json({ base_revision, document, viewport }) }),
+  listCanvasVersions: (id: string, limit = 50) => request<CanvasVersion[]>(`/canvases/${id}/versions?limit=${limit}`),
+  restoreCanvasVersion: (id: string, version_revision: number, base_revision: number) => request<CanvasSnapshot>(`/canvases/${id}/restore`, { method: "POST", body: json({ version_revision, base_revision }) }),
   listAssets: (search = "") => request<Asset[]>(`/assets${search ? `?search=${encodeURIComponent(search)}` : ""}`),
   uploadAsset: (file: File) => { const form = new FormData(); form.set("file", file); return request<Asset>("/assets", { method: "POST", body: form }); },
+  saveGeneratedAsset: (id: string) => request<Asset>(`/assets/${id}/save`, { method: "POST" }),
   setFavorite: (id: string, favorite: boolean) => request<Asset>(`/assets/${id}/favorite`, { method: "PATCH", body: json({ favorite }) }),
-  getModelConfig: () => request<{ provider: string; base_url: string; model_name: string; configured: boolean }>("/agent/model-config"),
-  saveModelConfig: (input: { provider: "openai-compatible"; base_url: string; model_name: string; api_key?: string }) => request<{ provider: string; base_url: string; model_name: string; configured: boolean }>("/agent/model-config", { method: "PUT", body: json(input) }),
-  testModelConfig: (input: { provider: "openai-compatible"; base_url: string; model_name: string; api_key: string }) => request<{ ok: boolean; message: string }>("/agent/model-config/test", { method: "POST", body: json(input) }),
-  submitAgentGoal: (input: { canvas_id: string; goal: string; reference_asset_ids: string[]; idempotency_key: string }) => request<AgentRun>("/agent/runs", { method: "POST", body: json(input) }),
+  getModelConfig: () => request<{ provider: string; base_url: string; model_name: string; role_models: Record<string, string>; configured: boolean }>("/agent/model-config"),
+  saveModelConfig: (input: { provider: "openai-compatible"; base_url: string; model_name: string; api_key?: string; role_models: Record<string, string> }) => request<{ provider: string; base_url: string; model_name: string; role_models: Record<string, string>; configured: boolean }>("/agent/model-config", { method: "PUT", body: json(input) }),
+  testModelConfig: (input: { provider: "openai-compatible"; base_url: string; model_name: string; api_key: string; role_models?: Record<string, string> }) => request<{ ok: boolean; message: string }>("/agent/model-config/test", { method: "POST", body: json(input) }),
+  submitAgentGoal: (input: { canvas_id: string; goal: string; reference_asset_ids: string[]; generation_settings?: Omit<ImageGenerationInput, "prompt" | "reference_asset_ids">; idempotency_key: string }) => request<AgentRun>("/agent/runs", { method: "POST", body: json(input) }),
   getAgentRun: (id: string) => request<AgentRun>(`/agent/runs/${id}`),
   cancelAgentRun: (id: string) => request<AgentRun>(`/agent/runs/${id}/cancel`, { method: "POST" }),
   retryAgentRun: (id: string) => request<AgentRun>(`/agent/runs/${id}/retry`, { method: "POST" }),
   applyProposal: (id: string, base_revision: number) => request<CanvasSnapshot>(`/agent/runs/${id}/apply`, { method: "POST", body: json({ base_revision }) }),
   rejectProposal: (id: string) => request<AgentRun>(`/agent/runs/${id}/reject`, { method: "POST" }),
-  generateImage: (input: Record<string, unknown>) => request<unknown>("/generations", { method: "POST", body: json(input) }),
+  generateImage: (input: ImageGenerationInput) => request<ImageGenerationResult>("/generations", { method: "POST", body: json(input) }),
 };

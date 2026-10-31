@@ -5,10 +5,10 @@ import { api, ApiError } from "@canvas/api-client";
 import { AppHeader } from "../components/AppHeader";
 
 const agentRoles = [
-  { name: "Coordinator", description: "理解目标、安排任务和汇总结果", model: "gpt-4o-mini", tone: "role-green" },
-  { name: "Planner", description: "规划画面结构与创作步骤", model: "gpt-4o-mini", tone: "role-sand" },
-  { name: "Canvas Editor", description: "提出允许的画布增删改操作", model: "gpt-4o-mini", tone: "role-lilac" },
-  { name: "Reviewer", description: "检查层级、重叠和操作安全", model: "gpt-4o-mini", tone: "role-blue" },
+  { name: "Coordinator", description: "理解目标、安排任务和汇总结果", tone: "role-green" },
+  { name: "Planner", description: "规划画面结构与创作步骤", tone: "role-sand" },
+  { name: "Canvas Editor", description: "提出允许的画布增删改操作", tone: "role-lilac" },
+  { name: "Reviewer", description: "检查层级、重叠和操作安全", tone: "role-blue" },
 ];
 
 export function AgentSettingsPage() {
@@ -17,6 +17,7 @@ export function AgentSettingsPage() {
   const [showKey, setShowKey] = useState(false);
   const [baseUrl, setBaseUrl] = useState("");
   const [modelName, setModelName] = useState("");
+  const [roleModels, setRoleModels] = useState<Record<string, string>>({});
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -25,6 +26,7 @@ export function AgentSettingsPage() {
     api.getModelConfig().then((config) => {
       setBaseUrl(config.base_url);
       setModelName(config.model_name);
+      setRoleModels(config.role_models ?? {});
       setSaved(config.configured);
     }).catch((cause) => setMessage(cause instanceof ApiError ? cause.message : "无法连接服务端。"));
   }, []);
@@ -34,6 +36,9 @@ export function AgentSettingsPage() {
       provider: "openai-compatible" as const,
       base_url: baseUrl,
       model_name: modelName,
+      role_models: Object.fromEntries(
+        Object.entries(roleModels).map(([role, model]) => [role, model.trim()]).filter(([, model]) => model),
+      ),
       ...(includeKey ? { api_key: apiKey } : {}),
     };
   }
@@ -43,7 +48,7 @@ export function AgentSettingsPage() {
     setConnected(false);
     setMessage("");
     try {
-      await api.testModelConfig(modelInput(true) as { provider: "openai-compatible"; base_url: string; model_name: string; api_key: string });
+      await api.testModelConfig({ ...modelInput(false), api_key: apiKey });
       setConnected(true);
       setMessage("模型服务连接成功。");
     } catch (cause) {
@@ -92,8 +97,8 @@ export function AgentSettingsPage() {
             </div>
             <div className="roles-section">
               <div className="section-heading"><div><h2>Agent 角色</h2><p>不同角色可以共用模型，也可以单独指定。</p></div><button className="button button-quiet"><Leaf size={15} />角色说明</button></div>
-              <div className="role-grid">{agentRoles.map((role) => <article className="role-card" key={role.name}><span className={`role-symbol ${role.tone}`}><Sparkles size={17} /></span><div className="role-info"><strong>{role.name}</strong><p>{role.description}</p><span className="role-model">{role.model}</span></div><button className="toggle-switch on" aria-label={`启用 ${role.name}`}><i /></button></article>)}</div>
-              <p className="future-agent-note">Image Creator 等待你提供生图与改图接口文档后再接入，当前不会调用外部图像 API。</p>
+              <div className="role-grid">{agentRoles.map((role) => <article className="role-card" key={role.name}><span className={`role-symbol ${role.tone}`}><Sparkles size={17} /></span><div className="role-info"><strong>{role.name}</strong><p>{role.description}</p><label className="role-model-setting"><input className="role-model-input" value={roleModels[role.name] ?? ""} onChange={(event) => setRoleModels((current) => ({ ...current, [role.name]: event.target.value }))} placeholder={modelName || "共用默认模型"} aria-label={`${role.name} 专属模型 ID`} /><small>{roleModels[role.name]?.trim() ? "使用专属模型" : modelName ? `共用默认 · ${modelName}` : "留空时共用默认模型"}</small></label></div><span className="toggle-switch on" aria-label={`${role.name} 已启用`}><i /></span></article>)}</div>
+              <p className="future-agent-note">Image Creator 已接入抽象生图 Provider；当前没有配置具体服务，不会发起外部请求。改图 Provider 暂未接入。</p>
             </div>
           </section>
         </div>

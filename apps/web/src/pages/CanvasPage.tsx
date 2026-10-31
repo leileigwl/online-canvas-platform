@@ -1,7 +1,7 @@
 import Konva from "konva";
 import {
   ArrowRight, Check, CircleHelp, Cloud, Copy,
-  Eye, EyeOff, Hand, ImagePlus, Leaf, Maximize2, Minimize2, MousePointer2, MoreHorizontal, Palette, Redo2,
+  Eye, EyeOff, Hand, History, ImagePlus, Leaf, Maximize2, Minimize2, MousePointer2, MoreHorizontal, Palette, Redo2,
   Settings2, Sparkles, Square, Undo2, Upload, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -9,7 +9,7 @@ import type { Dispatch, FormEvent, RefObject, SetStateAction } from "react";
 import { Image as KonvaImage, Arrow as KonvaArrow, Group, Layer, Line, Rect, Stage, Text, Transformer } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
 import { Link, useNavigate, useParams } from "react-router";
-import { api, ApiError, type AgentRun } from "@canvas/api-client";
+import { api, ApiError, type AgentRun, type Asset as ApiAsset, type CanvasVersion } from "@canvas/api-client";
 import type { CanvasSnapshot, CanvasViewport } from "@canvas/canvas-core";
 import { saveAssetToLibrary } from "../lib/asset-store";
 import { sampleAssets, type SampleAsset } from "../lib/samples";
@@ -46,6 +46,42 @@ type CanvasConflict = {
 };
 
 type AgentGoalRequest = { id: string; prompt: string; runId?: string };
+type AgentGenerationSettings = {
+  model: string;
+  quality: string;
+  width: number;
+  height: number;
+  align_to_16: boolean;
+  resolution: string;
+  aspect_ratio: string;
+  transparent: boolean;
+  count: number;
+};
+type AgentTaskGroup = { tasks: AgentRun["tasks"]; isEditor: boolean };
+
+function groupAgentTasks(tasks: AgentRun["tasks"]): AgentTaskGroup[] {
+  return tasks.reduce<AgentTaskGroup[]>((groups, task) => {
+    const last = groups.at(-1);
+    const sameDependencies = last?.tasks[0]?.depends_on.join("|") === task.depends_on.join("|");
+    if (task.role === "Canvas Editor" && last?.isEditor && sameDependencies) {
+      last.tasks.push(task);
+    } else {
+      groups.push({ tasks: [task], isEditor: task.role === "Canvas Editor" });
+    }
+    return groups;
+  }, []);
+}
+
+function sampleAssetFromApi(asset: ApiAsset): SampleAsset {
+  return {
+    id: asset.id,
+    name: asset.name,
+    src: asset.src,
+    dimensions: `${asset.width} × ${asset.height}`,
+    favorite: asset.favorite,
+    recent: true,
+  };
+}
 
 type ImageGenerationSettings = {
   quality: string;
@@ -59,6 +95,7 @@ type ImageGenerationSettings = {
 };
 
 const qualityOptions = ["自动", "低", "中", "高", "极高", "最高"];
+const qualityApiValues: Record<string, string> = { 自动: "auto", 低: "low", 中: "medium", 高: "high", 极高: "very_high", 最高: "maximum" };
 const resolutionOptions = ["1K", "2K", "4K", "自动"];
 const aspectRatioOptions = ["1:1", "2:3", "3:2", "4:3", "3:4", "16:9", "9:16", "21:9", "9:21", "自动"];
 
@@ -427,7 +464,7 @@ function CanvasStage({ items, setItems, tool, setTool, selectedIds, setSelectedI
   );
 }
 
-function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, onApplyRemote, onRejectRemote, onCancelRun, onRetryRun, onSaveAsset, references, onRemoveReference, onClearReferences, proposalHistorySignal, submittedGoal, agentRun, agentError }: {
+function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, onApplyRemote, onRejectRemote, onCancelRun, onRetryRun, onSaveAsset, onAddGeneratedAsset, onSaveGeneratedAsset, references, onRemoveReference, onClearReferences, proposalHistorySignal, submittedGoal, agentRun, agentError }: {
   open: boolean;
   compact: boolean;
   onToggleCompact: () => void;
@@ -438,10 +475,12 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
   onCancelRun: (runId: string) => Promise<void>;
   onRetryRun: (runId: string) => Promise<void>;
   onSaveAsset: (asset: SampleAsset) => void;
+  onAddGeneratedAsset: (asset: ApiAsset) => void;
+  onSaveGeneratedAsset: (asset: ApiAsset) => Promise<boolean>;
   references: SampleAsset[];
   onRemoveReference: (id: string) => void;
   onClearReferences: () => void;
-  proposalHistorySignal: { action: "undo" | "redo"; proposalId: string | null; revision: number };
+  proposalHistorySignal: { action: "undo" | "redo"; historyId: string | null; revision: number };
   submittedGoal: AgentGoalRequest | null;
   agentRun: AgentRun | null;
   agentError: string;
@@ -451,13 +490,33 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
   const [proposalImageSaved, setProposalImageSaved] = useState(false);
   const [localProposalReady, setLocalProposalReady] = useState(false);
   const [proposalId, setProposalId] = useState<string>(() => crypto.randomUUID());
-  const [review, setReview] = useState<"pending" | "applied" | "rejected">("pending");
+  const [review, setReview] = useState<"pending" | "applied" | "rejected" | "undone">("pending");
   const [proposalApplied, setProposalApplied] = useState(false);
   const [runActionPending, setRunActionPending] = useState(false);
+  const [proposalApplyPending, setProposalApplyPending] = useState(false);
+  const [savingGeneratedAssetId, setSavingGeneratedAssetId] = useState<string | null>(null);
+  const [savedGeneratedAssetIds, setSavedGeneratedAssetIds] = useState<string[]>([]);
   const remoteRun = submittedGoal?.runId && agentRun?.id === submittedGoal.runId ? agentRun : null;
+  const historyId = remoteRun?.id ?? proposalId;
+  const generatedAssets = remoteRun?.proposal?.generated_assets ?? [];
   const proposalReady = remoteRun ? remoteRun.status === "succeeded" && Boolean(remoteRun.proposal) : localProposalReady;
   const remoteFailed = remoteRun?.status === "failed";
   const hasConversation = Boolean(sent.trim());
+  const taskStatusLabels: Record<string, string> = {
+    queued: "等待前序任务",
+    running: "处理中",
+    succeeded: "已完成",
+    failed: "失败",
+    canceled: "已取消",
+  };
+  const renderRemoteTask = (task: AgentRun["tasks"][number]) => {
+    const isReviewer = task.role === "Reviewer";
+    const isUndone = isReviewer && review === "undone";
+    const isPendingReview = isReviewer && review === "pending";
+    const status = isUndone ? "undone" : isPendingReview ? "running" : task.status;
+    const reviewerLabel = review === "applied" ? "Reviewer · 已接受并应用到画布" : review === "rejected" ? "Reviewer · 提案已拒绝" : review === "undone" ? "Reviewer · 已整体撤销提案" : "Reviewer · 等待你审阅画布修改";
+    return <div className={`task-row ${status === "succeeded" ? "task-done" : status === "running" ? "task-running" : status === "failed" ? "task-failed" : ""}`} key={task.id}><span className="task-state">{isUndone ? "↶" : status === "succeeded" ? <Check size={12} /> : status === "running" ? <i /> : status === "failed" ? "!" : task.sequence + 1}</span><div><strong>{task.title || task.role}</strong><small>{isReviewer ? reviewerLabel : task.error ?? `${task.role} · ${taskStatusLabels[task.status] ?? task.status}${task.depends_on.length ? ` · 依赖 ${task.depends_on.length} 项` : ""}`}</small></div></div>;
+  };
 
   async function cancelRun() {
     if (!remoteRun) return;
@@ -471,11 +530,25 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
     try { await onRetryRun(remoteRun.id); } finally { setRunActionPending(false); }
   }
 
+  async function applyRemoteProposal() {
+    if (!remoteRun || proposalApplyPending) return;
+    setProposalApplyPending(true);
+    try {
+      await onApplyRemote(remoteRun.id);
+      setProposalApplied(true);
+      setReview("applied");
+    } catch {
+      // CanvasPage reports the API error in the Agent panel.
+    } finally {
+      setProposalApplyPending(false);
+    }
+  }
+
   useEffect(() => {
-    if (!proposalHistorySignal.revision || proposalHistorySignal.proposalId !== proposalId) return;
-    setReview(proposalHistorySignal.action === "undo" ? "pending" : "applied");
+    if (!proposalHistorySignal.revision || proposalHistorySignal.historyId !== historyId) return;
+    setReview(proposalHistorySignal.action === "undo" ? (remoteRun ? "undone" : "pending") : "applied");
     setProposalApplied(proposalHistorySignal.action === "redo");
-  }, [proposalHistorySignal, proposalId]);
+  }, [historyId, proposalHistorySignal, remoteRun]);
 
   useEffect(() => {
     if (!submittedGoal) return;
@@ -483,6 +556,7 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
     setReview("pending");
     setProposalApplied(false);
     setProposalImageSaved(false);
+    setSavedGeneratedAssetIds([]);
     setProposalId(crypto.randomUUID());
     setLocalProposalReady(!submittedGoal.runId);
   }, [submittedGoal?.id]);
@@ -493,9 +567,21 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
     setReview("pending");
     setProposalApplied(false);
     setProposalImageSaved(false);
+    setSavedGeneratedAssetIds([]);
     setLocalProposalReady(false);
     setProposalId(crypto.randomUUID());
     setShowMenu(false);
+  }
+
+  async function saveGeneratedAsset(asset: ApiAsset) {
+    setSavingGeneratedAssetId(asset.id);
+    try {
+      if (await onSaveGeneratedAsset(asset)) {
+        setSavedGeneratedAssetIds((current) => current.includes(asset.id) ? current : [...current, asset.id]);
+      }
+    } finally {
+      setSavingGeneratedAssetId(null);
+    }
   }
 
   return (
@@ -508,15 +594,17 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
         {references.length > 0 && <section className="agent-selected-references" aria-label="已选参考图片"><div className="agent-selected-references-heading"><strong>已选图片</strong><span>{references.length}</span></div><div className="agent-selected-reference-list">{references.map((asset) => <div className="agent-selected-reference" key={asset.id}><img src={asset.src} alt={asset.name} /><span title={asset.name}>{asset.name}</span><button type="button" aria-label={`移除参考图片 ${asset.name}`} title="移除参考图片" onClick={() => onRemoveReference(asset.id)}><X size={12} /></button></div>)}</div></section>}
         {hasConversation && <div className="agent-thread">
           <div className="chat-bubble user-bubble">{sent}</div>
-          <div className="chat-answer"><span className="agent-avatar"><Leaf size={14} /></span><div><strong>{remoteFailed ? "Agent 任务未完成" : remoteRun?.status === "succeeded" ? "Coordinator 已完成审阅" : "Coordinator 已接收目标"}</strong><p>{remoteRun?.error ?? remoteRun?.summary ?? "我会结合当前画布和已选图片整理创作建议。"}</p></div></div>
+          <div className="chat-answer"><span className="agent-avatar"><Leaf size={14} /></span><div><strong>{remoteFailed ? "Agent 任务未完成" : generatedAssets.length ? "Image Creator 已完成" : remoteRun?.status === "succeeded" ? "Coordinator 已完成审阅" : "Agent 已接收目标"}</strong><p>{remoteRun?.error ?? remoteRun?.summary ?? "我会结合当前画布和已选图片整理创作建议。"}</p></div></div>
         </div>}
         {!hasConversation && references.length === 0 && <p className="agent-empty-state">从画布点击图片即可加入参考。提交创作目标后，这里会展示 Agent 的执行过程和结果。</p>}
         {agentError && <p className="form-error agent-empty-state" role="alert">{agentError}</p>}
-        {hasConversation && <section className="task-card"><div className="task-card-head"><span><Sparkles size={14} />执行计划</span><small>{remoteRun ? `${remoteRun.tasks.filter((task) => task.status === "succeeded").length}/${remoteRun.tasks.length}` : "3/3"}</small></div><div className="task-list">
-          <div className={`task-row ${remoteRun ? remoteRun.tasks[0]?.status === "succeeded" ? "task-done" : remoteRun.tasks[0]?.status === "running" ? "task-running" : "" : "task-done"}`}><span className="task-state">{!remoteRun || remoteRun.tasks[0]?.status === "succeeded" ? <Check size={12} /> : remoteRun.tasks[0]?.status === "running" ? <i /> : "1"}</span><div><strong>解析画布内容</strong><small>{remoteRun?.tasks[0]?.error ?? "Coordinator · 读取画布和授权参考图"}</small></div></div>
-          <div className={`task-row ${proposalReady ? "task-done" : remoteRun?.tasks[1]?.status === "running" ? "task-running" : localProposalReady ? "task-done" : ""}`}><span className="task-state">{proposalReady || localProposalReady ? <Check size={12} /> : remoteRun?.tasks[1]?.status === "running" ? <i /> : "2"}</span><div><strong>生成视觉方案</strong><small>{remoteRun?.tasks[1]?.error ?? (proposalReady ? "Planner · 已形成受限画布提案" : "Planner · 等待处理目标")}</small></div></div>
-          <div className={`task-row ${review === "applied" || review === "rejected" ? "task-done" : proposalReady ? "task-running" : ""}`}><span className="task-state">{review === "applied" || review === "rejected" ? <Check size={12} /> : proposalReady ? <i /> : "3"}</span><div><strong>输出结果</strong><small>{review === "applied" ? "Reviewer · 已接受并应用到画布" : review === "rejected" ? "Reviewer · 提案已拒绝" : proposalReady ? "Reviewer · 等待你审阅画布修改" : remoteFailed ? "任务失败，可检查模型设置后重试" : "等待前序步骤完成"}</small></div></div>
-        </div>{remoteRun && ["queued", "running"].includes(remoteRun.status) && <div className="agent-run-actions"><span>任务运行中</span><button disabled={runActionPending} onClick={() => void cancelRun()}>{runActionPending ? "处理中…" : "取消任务"}</button></div>}{remoteFailed && <div className="agent-run-actions"><span>可重新执行本次目标</span><button disabled={runActionPending} onClick={() => void retryRun()}>{runActionPending ? "处理中…" : "重试"}</button></div>}{remoteRun?.status === "canceled" && <div className="agent-run-actions"><span>本次任务已取消</span></div>}{proposalReady && <>{!remoteRun && <div className="temporary-output-card"><img src="/assets/bloom.svg" alt="交互演示图片预览" /><div><strong>交互演示预览</strong><small>{proposalImageSaved ? "已保存到资产" : "模拟结果 · 临时内容"}</small></div><button disabled={proposalImageSaved} onClick={() => { onSaveAsset({ id: `generated-${proposalId}`, name: `生成预览-${proposalId.slice(0, 6)}.svg`, src: "/assets/bloom.svg", dimensions: "1024 × 1024", recent: true }); setProposalImageSaved(true); }}>{proposalImageSaved ? "已保存" : "保存到资产"}</button></div>}<div className="agent-result-inline"><div><strong>画布提案</strong><span>{review === "pending" ? remoteRun?.summary ?? "新增便签「视觉层级建议」" : review === "applied" ? "提案已加入画布，可撤销" : "本次提案已拒绝"}</span></div>{review === "pending" ? <div className="agent-result-actions"><button onClick={() => { if (remoteRun) void onRejectRemote(remoteRun.id); setReview("rejected"); }}>拒绝</button><button className="accept" onClick={() => { if (remoteRun) { void onApplyRemote(remoteRun.id).then(() => { setProposalApplied(true); setReview("applied"); }); } else { if (!proposalApplied) { onApplyProposal(proposalId); setProposalApplied(true); } setReview("applied"); } }}>应用</button></div> : review === "rejected" && <button className="agent-result-retry" onClick={() => setReview("pending")}>重新查看</button>}</div></>}</section>}
+        {hasConversation && <section className="task-card"><div className="task-card-head"><span><Sparkles size={14} />执行计划</span><small>{remoteRun ? `${remoteRun.tasks.filter((task) => task.status === "succeeded").length}/${remoteRun.tasks.length}` : "3/3"}</small></div>{remoteRun && remoteRun.tasks[0]?.role !== "Image Creator" && <div className="agent-budget-summary">模型调用 {remoteRun.model_calls_used}/{remoteRun.model_call_budget} · 已报告输出 token {remoteRun.completion_tokens_used}（{remoteRun.completion_usage_reports}/{remoteRun.model_calls_used} 次）· 单次上限 {remoteRun.completion_tokens_per_call}</div>}<div className="task-list">
+          {remoteRun ? groupAgentTasks(remoteRun.tasks).map((group, index) => group.tasks.length > 1 ? <div className="agent-parallel-row" role="group" aria-label="可并行的编辑子任务" key={`parallel-${index}`}>{group.tasks.map(renderRemoteTask)}</div> : group.tasks.map(renderRemoteTask)) : <>
+            <div className="task-row task-done"><span className="task-state"><Check size={12} /></span><div><strong>解析画布内容</strong><small>Coordinator · 读取画布和授权参考图</small></div></div>
+            <div className={`task-row ${localProposalReady ? "task-done" : ""}`}><span className="task-state">{localProposalReady ? <Check size={12} /> : "2"}</span><div><strong>生成视觉方案</strong><small>Planner · 等待处理目标</small></div></div>
+            <div className={`task-row ${review === "applied" || review === "rejected" ? "task-done" : review === "undone" ? "" : localProposalReady ? "task-running" : ""}`}><span className="task-state">{review === "applied" || review === "rejected" ? <Check size={12} /> : review === "undone" ? "↶" : localProposalReady ? <i /> : "3"}</span><div><strong>输出结果</strong><small>{review === "applied" ? "Reviewer · 已接受并应用到画布" : review === "rejected" ? "Reviewer · 提案已拒绝" : review === "undone" ? "Reviewer · 已整体撤销提案" : localProposalReady ? "Reviewer · 等待你审阅画布修改" : "等待前序步骤完成"}</small></div></div>
+          </>}
+        </div>{remoteRun && ["queued", "running"].includes(remoteRun.status) && <div className="agent-run-actions"><span>任务运行中</span><button disabled={runActionPending} onClick={() => void cancelRun()}>{runActionPending ? "处理中…" : "取消任务"}</button></div>}{remoteFailed && <div className="agent-run-actions"><span>可重新执行本次目标</span><button disabled={runActionPending} onClick={() => void retryRun()}>{runActionPending ? "处理中…" : "重试"}</button></div>}{remoteRun?.status === "canceled" && <div className="agent-run-actions"><span>本次任务已取消</span></div>}{proposalReady && <>{generatedAssets.length > 0 ? <div className="agent-generated-results"><div className="agent-generated-heading"><strong>生成结果</strong><span>{generatedAssets.length} 张 · 临时图片</span></div>{generatedAssets.map((asset) => { const saved = !asset.temporary || savedGeneratedAssetIds.includes(asset.id); return <article className="agent-generated-card" key={asset.id}><img src={asset.src} alt={asset.name} /><div className="agent-generated-info"><strong title={asset.name}>{asset.name}</strong><small>{asset.width} × {asset.height}</small><div><button type="button" onClick={() => onAddGeneratedAsset(asset)}>加入画布</button><button type="button" disabled={saved || savingGeneratedAssetId === asset.id} onClick={() => void saveGeneratedAsset(asset)}>{saved ? "已保存" : savingGeneratedAssetId === asset.id ? "保存中…" : "保存到素材"}</button></div></div></article>; })}</div> : <>{!remoteRun && <div className="temporary-output-card"><img src="/assets/bloom.svg" alt="交互演示图片预览" /><div><strong>交互演示预览</strong><small>{proposalImageSaved ? "已保存到资产" : "模拟结果 · 临时内容"}</small></div><button disabled={proposalImageSaved} onClick={() => { onSaveAsset({ id: `generated-${proposalId}`, name: `生成预览-${proposalId.slice(0, 6)}.svg`, src: "/assets/bloom.svg", dimensions: "1024 × 1024", recent: true }); setProposalImageSaved(true); }}>{proposalImageSaved ? "已保存" : "保存到资产"}</button></div>}<div className="agent-result-inline"><div><strong>画布提案</strong><span>{review === "pending" ? remoteRun?.summary ?? "新增便签「视觉层级建议」" : review === "applied" ? "提案已加入画布，可撤销" : review === "undone" ? "提案已整体撤销，可重做" : "本次提案已拒绝"}</span></div>{review === "pending" ? <div className="agent-result-actions"><button onClick={() => { if (remoteRun) void onRejectRemote(remoteRun.id); setReview("rejected"); }}>拒绝</button><button className="accept" disabled={proposalApplyPending} onClick={() => { if (remoteRun) { void applyRemoteProposal(); } else { if (!proposalApplied) { onApplyProposal(proposalId); setProposalApplied(true); } setReview("applied"); } }}>{proposalApplyPending ? "应用中…" : "应用"}</button></div> : review === "rejected" && <button className="agent-result-retry" onClick={() => setReview("pending")}>重新查看</button>}</div></>}</>}</section>}
       </div>
       </>}
     </aside>
@@ -528,10 +616,11 @@ function AgentPanel({ open, compact, onToggleCompact, onClose, onApplyProposal, 
 function ImageGenerationBar({ references, onRemoveReference, onSubmitPrompt, focusPromptRequest }: {
   references: SampleAsset[];
   onRemoveReference: (id: string) => void;
-  onSubmitPrompt: (prompt: string) => Promise<boolean>;
+  onSubmitPrompt: (prompt: string, generationSettings?: AgentGenerationSettings) => Promise<boolean>;
   focusPromptRequest: number;
 }) {
   const [prompt, setPrompt] = useState("");
+  const [mode, setMode] = useState<"agent" | "image">("agent");
   const [model, setModel] = useState("gpt-image-2");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notice, setNotice] = useState("");
@@ -595,9 +684,22 @@ function ImageGenerationBar({ references, onRemoveReference, onSubmitPrompt, foc
     if (!prompt.trim() || submitting) return;
     setSubmitting(true);
     try {
-      const accepted = await onSubmitPrompt(prompt.trim());
+      const generationSettings = mode === "image" ? {
+        model,
+        quality: qualityApiValues[settings.quality] ?? "auto",
+        width: settings.width,
+        height: settings.height,
+        align_to_16: settings.alignTo16,
+        resolution: settings.resolution === "自动" ? "auto" : settings.resolution,
+        aspect_ratio: settings.ratio === "自动" ? "auto" : settings.ratio,
+        transparent: settings.transparent,
+        count: settings.count,
+      } satisfies AgentGenerationSettings : undefined;
+      const accepted = await onSubmitPrompt(prompt.trim(), generationSettings);
       if (!accepted) return;
-      setNotice(`已提交给 Agent · ${model} · ${settings.quality} · ${settings.width}×${settings.height} · ${settings.resolution} · ${settings.ratio} · ${settings.count} 张${references.length ? ` · ${references.length} 张参考图` : ""}${settings.transparent ? " · 透明背景" : ""}。图像参数仅作界面记录，尚未调用生图服务。`);
+      setNotice(mode === "image"
+        ? `已提交图片生成 · ${model} · ${settings.quality} · ${settings.width}×${settings.height} · ${settings.resolution} · ${settings.ratio} · ${settings.count} 张${references.length ? ` · ${references.length} 张参考图` : ""}${settings.transparent ? " · 透明背景" : ""}`
+        : `已提交给多 Agent · 画布 revision 与参考图已附加${references.length ? ` · ${references.length} 张参考图` : ""}`);
       setPrompt("");
       setSettingsOpen(false);
     } finally {
@@ -610,18 +712,24 @@ function ImageGenerationBar({ references, onRemoveReference, onSubmitPrompt, foc
   return (
     <form ref={composerRef} className="image-generation-dock" onSubmit={submitGeneration}>
       {notice && <div className="generation-notice" role="status"><span>{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
-      {settingsOpen && <section className="image-settings-popover" role="dialog" aria-label="图像设置">
-        <div className="image-settings-header"><div><strong>图像设置</strong><small>调整本次生成参数</small></div><button type="button" aria-label="关闭图像设置" onClick={() => setSettingsOpen(false)}><X size={15} /></button></div>
-        <div className="image-settings-group"><span className="image-settings-label">质量</span><div className="quality-options">{qualityOptions.map((quality) => <button type="button" key={quality} className={settings.quality === quality ? "selected" : ""} aria-pressed={settings.quality === quality} onClick={() => setSettings((current) => ({ ...current, quality }))}>{quality}</button>)}</div></div>
-        <div className="image-settings-group"><div className="settings-label-row"><span className="image-settings-label">尺寸</span><button type="button" className={`settings-switch ${settings.alignTo16 ? "on" : ""}`} role="switch" aria-checked={settings.alignTo16} onClick={toggleDimensionAlignment}><span />16 倍数对齐</button></div><div className="dimension-fields"><label><span>W</span><input type="number" min={64} max={4096} step={settings.alignTo16 ? 16 : 1} value={settings.width} onChange={(event) => updateDimension("width", event.target.value)} /></label><span className="dimension-link">↔</span><label><span>H</span><input type="number" min={64} max={4096} step={settings.alignTo16 ? 16 : 1} value={settings.height} onChange={(event) => updateDimension("height", event.target.value)} /></label></div></div>
-        <div className="image-settings-group"><span className="image-settings-label">分辨率</span><div className="resolution-options">{resolutionOptions.map((resolution) => <button type="button" key={resolution} className={settings.resolution === resolution ? "selected" : ""} aria-pressed={settings.resolution === resolution} onClick={() => setSettings((current) => ({ ...current, resolution }))}>{resolution}</button>)}</div></div>
-        <div className="image-settings-group"><span className="image-settings-label">宽高比</span><div className="ratio-options">{aspectRatioOptions.map((ratio) => { const [ratioWidth, ratioHeight] = ratio === "自动" ? [1, 1] : ratio.split(":").map(Number); const previewWidth = ratio === "自动" ? 12 : Math.min(28, 22 * ratioWidth / ratioHeight); const previewHeight = ratio === "自动" ? 14 : Math.min(22, 28 * ratioHeight / ratioWidth); return <button type="button" key={ratio} className={settings.ratio === ratio ? "selected" : ""} aria-pressed={settings.ratio === ratio} onClick={() => chooseRatio(ratio)}><span className="ratio-preview">{ratio !== "自动" && <i style={{ width: `${previewWidth}px`, height: `${previewHeight}px` }} />}</span><span>{ratio}</span></button>; })}</div></div>
-        <div className="image-settings-footer"><span className="image-settings-label">透明背景</span><button type="button" className={`settings-switch ${settings.transparent ? "on" : ""}`} role="switch" aria-checked={settings.transparent} onClick={() => setSettings((current) => ({ ...current, transparent: !current.transparent }))}><span />{settings.transparent ? "开启" : "关闭"}</button></div>
-        <div className="image-settings-group"><span className="image-settings-label">生成张数</span><div className="count-options">{Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <button type="button" key={count} className={settings.count === count ? "selected" : ""} aria-pressed={settings.count === count} onClick={() => setSettings((current) => ({ ...current, count }))}>{count}</button>)}</div></div>
+      {settingsOpen && <section className="image-settings-popover" role="dialog" aria-label="任务设置">
+        <div className="image-settings-header"><div><strong>{mode === "image" ? "图片生成设置" : "Agent 任务设置"}</strong><small>选择本次创作的执行方式</small></div><button type="button" aria-label="关闭任务设置" onClick={() => setSettingsOpen(false)}><X size={15} /></button></div>
+        <div className="image-settings-group"><span className="image-settings-label">执行方式</span><div className="generation-mode-options" role="group" aria-label="执行方式">
+          <button type="button" className={mode === "agent" ? "selected" : ""} aria-pressed={mode === "agent"} onClick={() => setMode("agent")}><Sparkles size={14} /><span>画布协作</span></button>
+          <button type="button" className={mode === "image" ? "selected" : ""} aria-pressed={mode === "image"} onClick={() => setMode("image")}><ImagePlus size={14} /><span>图片生成</span></button>
+        </div></div>
+        {mode === "agent" ? <p className="generation-mode-description">Coordinator 会分析画布并组织专业 Agent；结果先审阅，再应用到画布。</p> : <>
+          <div className="image-settings-group"><span className="image-settings-label">质量</span><div className="quality-options">{qualityOptions.map((quality) => <button type="button" key={quality} className={settings.quality === quality ? "selected" : ""} aria-pressed={settings.quality === quality} onClick={() => setSettings((current) => ({ ...current, quality }))}>{quality}</button>)}</div></div>
+          <div className="image-settings-group"><div className="settings-label-row"><span className="image-settings-label">尺寸</span><button type="button" className={`settings-switch ${settings.alignTo16 ? "on" : ""}`} role="switch" aria-checked={settings.alignTo16} onClick={toggleDimensionAlignment}><span />16 倍数对齐</button></div><div className="dimension-fields"><label><span>W</span><input type="number" min={64} max={4096} step={settings.alignTo16 ? 16 : 1} value={settings.width} onChange={(event) => updateDimension("width", event.target.value)} /></label><span className="dimension-link">↔</span><label><span>H</span><input type="number" min={64} max={4096} step={settings.alignTo16 ? 16 : 1} value={settings.height} onChange={(event) => updateDimension("height", event.target.value)} /></label></div></div>
+          <div className="image-settings-group"><span className="image-settings-label">分辨率</span><div className="resolution-options">{resolutionOptions.map((resolution) => <button type="button" key={resolution} className={settings.resolution === resolution ? "selected" : ""} aria-pressed={settings.resolution === resolution} onClick={() => setSettings((current) => ({ ...current, resolution }))}>{resolution}</button>)}</div></div>
+          <div className="image-settings-group"><span className="image-settings-label">宽高比</span><div className="ratio-options">{aspectRatioOptions.map((ratio) => { const [ratioWidth, ratioHeight] = ratio === "自动" ? [1, 1] : ratio.split(":").map(Number); const previewWidth = ratio === "自动" ? 12 : Math.min(28, 22 * ratioWidth / ratioHeight); const previewHeight = ratio === "自动" ? 14 : Math.min(22, 28 * ratioHeight / ratioWidth); return <button type="button" key={ratio} className={settings.ratio === ratio ? "selected" : ""} aria-pressed={settings.ratio === ratio} onClick={() => chooseRatio(ratio)}><span className="ratio-preview">{ratio !== "自动" && <i style={{ width: `${previewWidth}px`, height: `${previewHeight}px` }} />}</span><span>{ratio}</span></button>; })}</div></div>
+          <div className="image-settings-footer"><span className="image-settings-label">透明背景</span><button type="button" className={`settings-switch ${settings.transparent ? "on" : ""}`} role="switch" aria-checked={settings.transparent} onClick={() => setSettings((current) => ({ ...current, transparent: !current.transparent }))}><span />{settings.transparent ? "开启" : "关闭"}</button></div>
+          <div className="image-settings-group"><span className="image-settings-label">生成张数</span><div className="count-options">{Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <button type="button" key={count} className={settings.count === count ? "selected" : ""} aria-pressed={settings.count === count} onClick={() => setSettings((current) => ({ ...current, count }))}>{count}</button>)}</div></div>
+        </>}
       </section>}
       {references.length > 0 && <div className="generation-reference-list" aria-label="已选参考图片">{references.map((reference) => <button type="button" className="generation-reference-thumb" key={reference.id} aria-label={`移除参考图片 ${reference.name}`} title={`移除参考图片 ${reference.name}`} onClick={() => onRemoveReference(reference.id)}><img src={reference.src} alt="" /><X size={11} /></button>)}</div>}
-      <input ref={promptRef} className="generation-prompt" type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述你的创作目标或图片修改…" aria-label="Agent 创作目标输入" />
-      <div className="generation-controls"><label className="generation-model"><span className="visually-hidden">生图模型</span><select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="flux-pro">Flux Pro</option><option value="imagen-4">Imagen 4</option></select><span aria-hidden="true">⌄</span></label><button type="button" className="generation-settings-trigger" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen((open) => !open)}><Settings2 size={16} /><span>{settingsSummary}</span></button><button type="submit" className="generation-submit" aria-label="提交给 Agent" title={submitting ? "正在提交" : "提交给 Agent"} disabled={!prompt.trim() || submitting} aria-busy={submitting}><ArrowRight size={17} /></button></div>
+      <input ref={promptRef} className="generation-prompt" type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={mode === "image" ? "描述想要生成的图片…" : "描述希望 Agent 在画布中完成的目标…"} aria-label={mode === "image" ? "图片生成描述" : "Agent 创作目标输入"} />
+      <div className="generation-controls">{mode === "image" ? <label className="generation-model"><span className="visually-hidden">生图模型</span><select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="flux-pro">Flux Pro</option><option value="imagen-4">Imagen 4</option></select><span aria-hidden="true">⌄</span></label> : <span className="generation-mode-indicator"><Sparkles size={14} />多 Agent 协作</span>}<button type="button" className="generation-settings-trigger" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen((open) => !open)}><Settings2 size={16} /><span>{mode === "image" ? settingsSummary : "画布协作"}</span></button><button type="submit" className="generation-submit" aria-label={mode === "image" ? "提交图片生成" : "提交给 Agent"} title={submitting ? "正在提交" : mode === "image" ? "提交图片生成" : "提交给 Agent"} disabled={!prompt.trim() || submitting} aria-busy={submitting}><ArrowRight size={17} /></button></div>
     </form>
   );
 }
@@ -639,9 +747,17 @@ export function CanvasPage() {
   const [canvasLoadAttempt, setCanvasLoadAttempt] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [retryableSaveError, setRetryableSaveError] = useState(false);
+  const [saveRetryAttempt, setSaveRetryAttempt] = useState(0);
   const [draftStorageError, setDraftStorageError] = useState("");
   const [conflict, setConflict] = useState<CanvasConflict | null>(null);
   const [conflictOpen, setConflictOpen] = useState(false);
+  const [canvasHistoryOpen, setCanvasHistoryOpen] = useState(false);
+  const [canvasVersions, setCanvasVersions] = useState<CanvasVersion[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyRestoring, setHistoryRestoring] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyRestoreRevision, setHistoryRestoreRevision] = useState<number | null>(null);
   const saveInFlightRef = useRef<{ source: CanvasItem[]; scale: number; promise: Promise<Awaited<ReturnType<typeof api.saveCanvas>>> } | null>(null);
   const [agentRun, setAgentRun] = useState<AgentRun | null>(null);
   const [agentError, setAgentError] = useState("");
@@ -655,8 +771,9 @@ export function CanvasPage() {
   const [saved, setSaved] = useState(true);
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentCompact, setAgentCompact] = useState(false);
-  const [proposalHistorySignal, setProposalHistorySignal] = useState<{ action: "undo" | "redo"; proposalId: string | null; revision: number }>({ action: "undo", proposalId: null, revision: 0 });
+  const [proposalHistorySignal, setProposalHistorySignal] = useState<{ action: "undo" | "redo"; historyId: string | null; revision: number }>({ action: "undo", historyId: null, revision: 0 });
   const agentProposalItemIdRef = useRef<string | null>(null);
+  const agentProposalBatchRef = useRef<{ runId: string; before: CanvasItem[]; after: CanvasItem[] } | null>(null);
   const [agentAssets, setAgentAssets] = useState<SampleAsset[]>([]);
   const [generationReferences, setGenerationReferences] = useState<SampleAsset[]>([]);
   const [generationFocusRequest, setGenerationFocusRequest] = useState(0);
@@ -719,6 +836,8 @@ export function CanvasPage() {
       canvasRevisionRef.current = canvas.revision;
       setSaved(true);
       setSaveError("");
+      setRetryableSaveError(false);
+      setSaveRetryAttempt(0);
       setDraftStorageError("");
       if (itemsRef.current === sourceItems && zoomRef.current === scale) {
         setDirty(false);
@@ -738,6 +857,7 @@ export function CanvasPage() {
       setSaved(false);
       setSaveError(cause instanceof ApiError ? cause.message : "自动保存失败；本地草稿仍保留。");
       if (cause instanceof ApiError && cause.status === 409) {
+        setRetryableSaveError(false);
         let latestCanvas: CanvasSnapshot | null = null;
         try {
           latestCanvas = await api.getCanvas(canvasId);
@@ -747,6 +867,8 @@ export function CanvasPage() {
         const localDraft = storeLocalDraft(itemsRef.current, undoStack.current, redoStack.current, zoomRef.current);
         setConflict({ local: localDraft, remote: latestCanvas });
         setConflictOpen(true);
+      } else {
+        setRetryableSaveError(!(cause instanceof ApiError) || cause.status === 408 || cause.status === 429 || cause.status >= 500);
       }
       setDirty(false);
       throw cause;
@@ -755,9 +877,79 @@ export function CanvasPage() {
     }
   }
 
+  async function openCanvasHistory() {
+    setCanvasHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError("");
+    setHistoryRestoreRevision(null);
+    try {
+      setCanvasVersions(await api.listCanvasVersions(canvasId));
+    } catch (cause) {
+      setHistoryError(cause instanceof ApiError ? cause.message : "无法载入画布版本记录。");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function restoreCanvasVersion(versionRevision: number) {
+    setHistoryRestoring(true);
+    setHistoryError("");
+    try {
+      const canvas = await api.restoreCanvasVersion(canvasId, versionRevision, canvasRevisionRef.current);
+      const restoredItems = canvas.document.items as CanvasItem[];
+      const nextUndoStack = [...undoStack.current, itemsRef.current].slice(-maxPersistedHistory);
+      undoStack.current = nextUndoStack;
+      redoStack.current = [];
+      itemsRef.current = restoredItems;
+      setItems(restoredItems);
+      setSelectedIds([]);
+      setZoom(canvas.viewport.scale || 1);
+      zoomRef.current = canvas.viewport.scale || 1;
+      canvasRevisionRef.current = canvas.revision;
+      setDirty(false);
+      setSaved(true);
+      setSaveError("");
+      setRetryableSaveError(false);
+      setSaveRetryAttempt(0);
+      setConflict(null);
+      setConflictOpen(false);
+      clearPersistedCanvasDraft(canvasId, {
+        items: restoredItems,
+        undoStack: nextUndoStack,
+        redoStack: [],
+        baseRevision: canvas.revision,
+        viewport: canvas.viewport,
+        dirty: false,
+      });
+      setCanvasHistoryOpen(false);
+      setHistoryRestoreRevision(null);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) {
+        let latest: CanvasSnapshot | null = null;
+        try {
+          latest = await api.getCanvas(canvasId);
+        } catch {
+          // Keep the local snapshot and let the existing conflict flow retry the cloud read.
+        }
+        const local = storeLocalDraft(itemsRef.current, undoStack.current, redoStack.current, zoomRef.current);
+        setConflict({ local, remote: latest });
+        setConflictOpen(true);
+        setCanvasHistoryOpen(false);
+        setDirty(false);
+        setHistoryError("");
+      } else {
+        setHistoryError(cause instanceof ApiError ? cause.message : "恢复失败；当前画布内容已保留。");
+      }
+    } finally {
+      setHistoryRestoring(false);
+    }
+  }
+
   useEffect(() => {
     if (!remoteCanvas) return;
     let active = true;
+    agentProposalItemIdRef.current = null;
+    agentProposalBatchRef.current = null;
     setRemoteReady(false);
     setSaveError("");
     api.getCanvas(canvasId).then((canvas) => {
@@ -827,6 +1019,27 @@ export function CanvasPage() {
     return () => window.clearTimeout(timer);
   }, [canvasId, dirty, items, remoteCanvas, remoteReady, zoom]);
 
+  useEffect(() => {
+    if (!remoteCanvas || !remoteReady || !retryableSaveError || !saveError || conflict || dirty || draftStorageError) return;
+    const delay = Math.min(30_000, 1_000 * 2 ** saveRetryAttempt);
+    const timer = window.setTimeout(() => {
+      if (!window.navigator.onLine) return;
+      setSaveRetryAttempt((attempt) => attempt + 1);
+      setDirty(true);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [conflict, dirty, draftStorageError, remoteCanvas, remoteReady, retryableSaveError, saveError, saveRetryAttempt]);
+
+  useEffect(() => {
+    const resumeSave = () => {
+      if (!remoteCanvas || !remoteReady || !retryableSaveError || conflict || draftStorageError) return;
+      setSaveRetryAttempt(0);
+      setDirty(true);
+    };
+    window.addEventListener("online", resumeSave);
+    return () => window.removeEventListener("online", resumeSave);
+  }, [conflict, draftStorageError, remoteCanvas, remoteReady, retryableSaveError]);
+
   const updateCanvasItems: Dispatch<SetStateAction<CanvasItem[]>> = (action) => {
     const previous = itemsRef.current;
     const next = typeof action === "function" ? action(previous) : action;
@@ -841,9 +1054,13 @@ export function CanvasPage() {
   function undo() {
     const previous = undoStack.current.at(-1);
     if (!previous) return;
+    const agentBatch = agentProposalBatchRef.current;
+    if (agentBatch && itemsRef.current === agentBatch.after && previous === agentBatch.before) {
+      setProposalHistorySignal((current) => ({ action: "undo", historyId: agentBatch.runId, revision: current.revision + 1 }));
+    }
     const proposalId = agentProposalItemIdRef.current;
     if (proposalId && itemsRef.current.some((item) => item.id === proposalId) && !previous.some((item) => item.id === proposalId)) {
-      setProposalHistorySignal((current) => ({ action: "undo", proposalId, revision: current.revision + 1 }));
+      setProposalHistorySignal((current) => ({ action: "undo", historyId: proposalId, revision: current.revision + 1 }));
     }
     undoStack.current = undoStack.current.slice(0, -1);
     redoStack.current = [...redoStack.current, itemsRef.current];
@@ -855,9 +1072,13 @@ export function CanvasPage() {
   function redo() {
     const next = redoStack.current.at(-1);
     if (!next) return;
+    const agentBatch = agentProposalBatchRef.current;
+    if (agentBatch && itemsRef.current === agentBatch.before && next === agentBatch.after) {
+      setProposalHistorySignal((current) => ({ action: "redo", historyId: agentBatch.runId, revision: current.revision + 1 }));
+    }
     const proposalId = agentProposalItemIdRef.current;
     if (proposalId && !itemsRef.current.some((item) => item.id === proposalId) && next.some((item) => item.id === proposalId)) {
-      setProposalHistorySignal((current) => ({ action: "redo", proposalId, revision: current.revision + 1 }));
+      setProposalHistorySignal((current) => ({ action: "redo", historyId: proposalId, revision: current.revision + 1 }));
     }
     redoStack.current = redoStack.current.slice(0, -1);
     undoStack.current = [...undoStack.current, itemsRef.current];
@@ -888,11 +1109,32 @@ export function CanvasPage() {
     setAgentAssets((current) => current.some((item) => item.id === asset.id) ? current : [asset, ...current]);
   }
 
-  async function submitAgentGoal(prompt: string): Promise<boolean> {
+  function addGeneratedAssetToCanvas(asset: ApiAsset) {
+    addAssetToCanvas(sampleAssetFromApi(asset));
+  }
+
+  async function saveGeneratedAssetToLibrary(asset: ApiAsset): Promise<boolean> {
+    try {
+      const savedAsset = await api.saveGeneratedAsset(asset.id);
+      const sampleAsset = sampleAssetFromApi(savedAsset);
+      saveAssetToLibrary(sampleAsset);
+      setAgentAssets((current) => current.some((item) => item.id === sampleAsset.id) ? current : [sampleAsset, ...current]);
+      return true;
+    } catch (cause) {
+      setAgentError(cause instanceof ApiError ? cause.message : "保存生成图片失败，请重试。");
+      return false;
+    }
+  }
+
+  async function submitAgentGoal(prompt: string, generationSettings?: AgentGenerationSettings): Promise<boolean> {
     setAgentError("");
     setAgentOpen(true);
     setAgentCompact(false);
     if (!remoteCanvas) {
+      if (generationSettings) {
+        setAgentError("图片生成需要先打开已保存到云端的画布。");
+        return false;
+      }
       setSubmittedGoal({ id: crypto.randomUUID(), prompt });
       return true;
     }
@@ -907,6 +1149,7 @@ export function CanvasPage() {
         canvas_id: canvasId,
         goal: prompt,
         reference_asset_ids: referenceAssetIds,
+        generation_settings: generationSettings,
         idempotency_key: crypto.randomUUID(),
       });
       setSubmittedGoal({ id: run.id, prompt, runId: run.id });
@@ -923,8 +1166,33 @@ export function CanvasPage() {
   }
 
   async function applyRemoteProposal(runId: string) {
+    setAgentError("");
+    try {
+      await applyRemoteProposalToCanvas(runId);
+    } catch (cause) {
+      setAgentError(cause instanceof ApiError ? cause.message : "应用提案失败；画布内容已保留，请重试。");
+      throw cause;
+    }
+  }
+
+  async function applyRemoteProposalToCanvas(runId: string) {
+    if (dirty || saveInFlightRef.current || saveError) {
+      await saveRemoteSnapshot(itemsRef.current, zoomRef.current);
+    }
+    const before = itemsRef.current;
     const canvas = await api.applyProposal(runId, canvasRevisionRef.current);
     const nextItems = canvas.document.items as CanvasItem[];
+    if (itemsRef.current !== before) {
+      const local = storeLocalDraft(itemsRef.current, undoStack.current, redoStack.current, zoomRef.current, canvas.revision);
+      canvasRevisionRef.current = canvas.revision;
+      setConflict({ local, remote: canvas });
+      setConflictOpen(true);
+      setDirty(false);
+      setSaved(false);
+      setSaveError("Agent 提案已应用；应用期间的本地编辑需要先处理版本冲突。");
+      setAgentRun((current) => current ? { ...current, proposal: current.proposal ? { ...current.proposal, applied: true } : null } : current);
+      return;
+    }
     undoStack.current = [...undoStack.current, itemsRef.current];
     redoStack.current = [];
     itemsRef.current = nextItems;
@@ -942,6 +1210,7 @@ export function CanvasPage() {
       viewport: canvas.viewport,
       dirty: false,
     });
+    agentProposalBatchRef.current = { runId, before, after: nextItems };
     setAgentRun((current) => current ? { ...current, proposal: current.proposal ? { ...current.proposal, applied: true } : null } : current);
   }
 
@@ -982,6 +1251,8 @@ export function CanvasPage() {
       setDirty(false);
       setSaved(true);
       setSaveError("");
+      setRetryableSaveError(false);
+      setSaveRetryAttempt(0);
       setDraftStorageError("");
       clearPersistedCanvasDraft(canvasId, {
         items: remoteItems,
@@ -1017,7 +1288,9 @@ export function CanvasPage() {
     : draftStorageError ? "浏览器空间不足，草稿未完整保护"
       : conflict ? "本地草稿已保留，等待选择版本"
         : !remoteReady ? saveError ? "点击重试载入" : "正在读取画布"
-          : saveError ? "本地草稿已保留，点击重试"
+          : saveError ? retryableSaveError
+            ? window.navigator.onLine ? "本地草稿已保留，正在自动重试" : "本地草稿已保留，联网后自动重试"
+            : "本地草稿已保留，点击重试"
             : `revision ${canvasRevisionRef.current}`;
   const saveStatusTitle = !remoteCanvas
     ? "画布暂存在当前浏览器会话，不会上传到服务器"
@@ -1196,7 +1469,7 @@ export function CanvasPage() {
           </div>
           <button className={`save-status ${conflict ? "has-conflict" : ""}`} onClick={() => { if (conflict) setConflictOpen(true); else if (remoteCanvas && !remoteReady) setCanvasLoadAttempt((attempt) => attempt + 1); else if (remoteCanvas && (draftStorageError || saveError)) setDirty(true); else if (!remoteCanvas) setSaved(true); }} title={saveStatusTitle}><Cloud size={16} /><span>{saveStatusLabel}</span><small>{saveStatusDetail}</small></button>
         </div>
-        <div className="editor-top-actions"><button className="agent-toggle" onClick={() => setAgentOpen((open) => !open)}><span />Agent</button><Link to="/account" className="avatar avatar-small">林</Link></div>
+        <div className="editor-top-actions">{remoteCanvas && <button type="button" className="canvas-history-trigger" aria-label="查看画布历史版本" title={dirty || !saved ? "请等待画布保存完成后查看版本" : "历史版本"} disabled={!remoteReady || dirty || !saved || Boolean(conflict) || historyRestoring} onClick={() => void openCanvasHistory()}><History size={15} /><span>版本</span></button>}<button className="agent-toggle" onClick={() => setAgentOpen((open) => !open)}><span />Agent</button><Link to="/account" className="avatar avatar-small">林</Link></div>
       </header>
       {conflict && conflictOpen && <div className="canvas-conflict-backdrop">
         <section className="canvas-conflict-dialog" role="alertdialog" aria-modal="true" aria-labelledby="canvas-conflict-title" aria-describedby="canvas-conflict-description">
@@ -1214,6 +1487,17 @@ export function CanvasPage() {
             </> : <button type="button" className="button button-accent" onClick={() => void refreshConflictRemote()}>重新读取云端版本</button>}
             <button type="button" className="canvas-conflict-later" onClick={() => setConflictOpen(false)}>稍后处理</button>
           </div>
+        </section>
+      </div>}
+      {canvasHistoryOpen && <div className="canvas-conflict-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !historyRestoring) setCanvasHistoryOpen(false); }}>
+        <section className="canvas-history-dialog" role="dialog" aria-modal="true" aria-labelledby="canvas-history-title" aria-describedby="canvas-history-description">
+          <div className="canvas-history-heading"><div><span className="canvas-history-icon"><History size={17} /></span><h2 id="canvas-history-title">画布历史版本</h2></div><button type="button" className="icon-button" aria-label="关闭版本记录" disabled={historyRestoring} onClick={() => setCanvasHistoryOpen(false)}><X size={16} /></button></div>
+          <p id="canvas-history-description">每次成功保存都会保留上一版。恢复会创建一个新的 revision，之后仍可撤销。</p>
+          {historyError && <div className="canvas-history-error" role="alert">{historyError}<button type="button" onClick={() => void openCanvasHistory()}>重试</button></div>}
+          {historyLoading ? <div className="canvas-history-empty">正在读取版本…</div> : canvasVersions.length === 0 ? <div className="canvas-history-empty">还没有可用的历史版本。</div> : <div className="canvas-history-list">{canvasVersions.map((version) => <article className={`canvas-history-row ${version.is_current ? "is-current" : ""}`} key={version.revision}>
+            <div className="canvas-history-copy"><div><strong>Revision {version.revision}</strong>{version.is_current && <span className="canvas-history-current">当前版本</span>}</div><small>{new Date(version.created_at).toLocaleString()} · {version.object_count} 个对象</small></div>
+            {!version.is_current && (historyRestoreRevision === version.revision ? <div className="canvas-history-confirm"><button type="button" disabled={historyRestoring} onClick={() => setHistoryRestoreRevision(null)}>取消</button><button type="button" className="confirm" disabled={historyRestoring} onClick={() => void restoreCanvasVersion(version.revision)}>{historyRestoring ? "恢复中…" : "确认恢复"}</button></div> : <button type="button" className="canvas-history-restore" disabled={historyRestoring} onClick={() => setHistoryRestoreRevision(version.revision)}>恢复</button>)}
+          </article>)}</div>}
         </section>
       </div>}
       <div className={`editor-workspace ${agentCompact ? "agent-compact" : ""}`}>
@@ -1237,7 +1521,7 @@ export function CanvasPage() {
           <ImageGenerationBar references={generationReferences} onRemoveReference={removeGenerationReference} onSubmitPrompt={submitAgentGoal} focusPromptRequest={generationFocusRequest} />
           <div className="canvas-help-hint"><span>空格 + 拖动</span> 平移画布 <span className="hint-dot">·</span> <span>滚轮</span> 缩放</div>
         </main>
-        <AgentPanel open={agentOpen} compact={agentCompact} onToggleCompact={() => setAgentCompact((value) => !value)} onClose={() => setAgentOpen(false)} references={generationReferences} onRemoveReference={removeGenerationReference} onClearReferences={() => { setGenerationReferences([]); setSubmittedGoal(null); setAgentRun(null); setAgentError(""); }} submittedGoal={submittedGoal} agentRun={agentRun} agentError={agentError} proposalHistorySignal={proposalHistorySignal} onSaveAsset={saveAssetFromAgent} onApplyRemote={applyRemoteProposal} onRejectRemote={rejectRemoteProposal} onCancelRun={cancelAgentRun} onRetryRun={retryAgentRun} onApplyProposal={(id) => { agentProposalItemIdRef.current = id; updateCanvasItems((current) => [...current, { id, type: "note", x: 330, y: 135, width: 190, height: 130, title: "视觉层级建议", content: "· 主图作为视觉焦点\n· 采用自然绿与暖米色\n· 保持留白和轻盈感" }]); }} />
+        <AgentPanel open={agentOpen} compact={agentCompact} onToggleCompact={() => setAgentCompact((value) => !value)} onClose={() => setAgentOpen(false)} references={generationReferences} onRemoveReference={removeGenerationReference} onClearReferences={() => { setGenerationReferences([]); setSubmittedGoal(null); setAgentRun(null); setAgentError(""); }} submittedGoal={submittedGoal} agentRun={agentRun} agentError={agentError} proposalHistorySignal={proposalHistorySignal} onSaveAsset={saveAssetFromAgent} onAddGeneratedAsset={addGeneratedAssetToCanvas} onSaveGeneratedAsset={saveGeneratedAssetToLibrary} onApplyRemote={applyRemoteProposal} onRejectRemote={rejectRemoteProposal} onCancelRun={cancelAgentRun} onRetryRun={retryAgentRun} onApplyProposal={(id) => { agentProposalBatchRef.current = null; agentProposalItemIdRef.current = id; updateCanvasItems((current) => [...current, { id, type: "note", x: 330, y: 135, width: 190, height: 130, title: "视觉层级建议", content: "· 主图作为视觉焦点\n· 采用自然绿与暖米色\n· 保持留白和轻盈感" }]); }} />
       </div>
       <div className="editor-toast"><span className="toast-dot" />{currentTool?.label}工具已选中 <button onClick={() => setSaved(true)}>保存演示状态</button></div>
     </div>

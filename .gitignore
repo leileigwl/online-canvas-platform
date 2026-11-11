@@ -9,6 +9,9 @@ dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.db
+data/
+backups/
 
 # Local configuration and secrets
 .env
@@ -19,6 +22,3 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
-
-# Private planning note; product decisions are maintained in docs/ and OpenSpec.
-/自己产品备忘录.md

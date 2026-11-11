@@ -1,4 +1,11 @@
-export type CanvasItemType = "image" | "note" | "swatch" | "shape" | "connector" | "brush";
+export type CanvasItemType =
+  | "image"
+  | "note"
+  | "text"
+  | "swatch"
+  | "shape"
+  | "connector"
+  | "brush";
 
 export type CanvasItem = {
   id: string;
@@ -10,6 +17,10 @@ export type CanvasItem = {
   title: string;
   content?: string;
   color?: string;
+  font_family?: "sans" | "serif" | "mono";
+  font_size?: number;
+  stroke_width?: number;
+  shape_kind?: "rect" | "circle" | "frame";
   points?: number[];
   visible?: boolean;
   asset_id?: string;

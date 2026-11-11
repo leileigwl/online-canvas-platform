@@ -1,46 +1,33 @@
 # AGENTS.md：工作规则入口
 
-本文件是 Codex 在仓库内工作的入口，负责说明先读什么、需求变化写到哪里、何时需要和用户确认，以及结束时如何交接。产品范围以 [`docs/PRODUCT.md`](docs/PRODUCT.md) 为准，技术边界以 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 为准。
+本文件是 AI 编程助手与开发者在本仓库内工作的总入口，负责说明先读什么、需求或技术变更写到哪里、何时必须暂停问用户，以及每轮结束时如何交接。  
+产品边界以 [`docs/PRODUCT.md`](docs/PRODUCT.md) 为准，技术与安全约束以 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 为准。
 
-## 每轮开始前
+## 每轮开始前（必须先读）
 
-1. 阅读 `docs/session-handoff.md`，了解当前阶段、已完成事项和下一步。
-2. 阅读 `docs/PRODUCT.md` 与 `docs/ARCHITECTURE.md`；涉及细节时再打开它们链接的模块文档和 OpenSpec。
-3. 检查用户本轮的新指示。新指示优先于旧交接记录；如有冲突，更新对应事实来源。
+1. 先阅读 [`docs/session-handoff.md`](docs/session-handoff.md)，掌握当前所处阶段、已完成事项、真实测试状态和下一步待办。
+2. 再阅读 [`docs/PRODUCT.md`](docs/PRODUCT.md) 与 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)；需要具体表字段、接口契约、原型规范或业务流程细节时，再按链接打开 [`docs/01-product/PRD.md`](docs/01-product/PRD.md) 与 [`docs/02-design/system-architecture.md`](docs/02-design/system-architecture.md)。
+3. 以用户本轮的最新指令为最高优先级；若与旧交接记录或旧文档冲突，先同步更新对应事实来源文档，再改代码。
 
-## 需求和设计变化
+## 需求和设计变更规范
 
-- 产品范围、用户、MVP 包含/排除项变化：更新 `docs/PRODUCT.md`、`docs/01-product/PRD.md`、相关 OpenSpec specs 和原型说明。
-- 技术栈、数据流、部署、存储或安全约束变化：更新 `docs/ARCHITECTURE.md`、`docs/02-design/system-architecture.md`，必要时更新 ADR 与 OpenSpec design/specs。
-- 原型和参考图按用途分别放在 `docs/02-design/prototypes/` 与 `docs/99-archive/references/`；过时材料归档，不静默覆盖或删除。
-- 入口文档只概括现状并链接到详细模块；避免在多个文件维护同一份完整规范。
+- **产品范围、用户角色、上线包含/排除项变化**：同步更新 [`docs/PRODUCT.md`](docs/PRODUCT.md) 与 [`docs/01-product/PRD.md`](docs/01-product/PRD.md)。
+- **技术栈、数据模型、安全边界、部署或存储约束变化**：同步更新 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 与 [`docs/02-design/system-architecture.md`](docs/02-design/system-architecture.md)。
+- **前端样式与页面改动（强制原型门控）**：用户提出前端样式或界面修改需求时，必须先在 [`docs/02-design/prototypes/`](docs/02-design/prototypes/README.md) 制作或更新可交互 HTML 原型图并经用户确认，**确认通过后再编写或修改 `apps/web/` 页面代码**。
+- **过时文档处理**：淘汰或被替代的设计文档归档至 `docs/99-archive/`，不要在多个文档里重复抄录同一份完整规范（入口文档只写核心边界与跳转链接）。
 
 ## 外部技术文档与 API 调研
 
-- 涉及框架、库、SDK、CLI、云服务或 API 的选型、配置和用法时，优先通过 Context7 获取当前文档；先调用 `resolve-library-id` 获取准确 library ID，再用 `query_docs` 按当前语言/版本查询具体主题。
-- 记录查阅日期、版本/接口版本、官方来源链接和会影响本项目的结论；不要把训练记忆或旧代码示例当作当前 API 依据。
-- 用户将提供的第三方接口，以用户提供的接口文档/示例为事实来源；若文档未说明鉴权、请求/响应、异步任务、费用或失败语义，先列出缺项，不猜测接口。
-- 不向文档查询服务发送 API Key、密码、私人项目数据或敏感请求内容。
+- 涉及第三方服务、SDK 或库 API 选型配置时，优先查询官方最新文档（可结合 Context7 核对当前锁定版本），记录查阅结论而非凭记忆臆测字段；严禁向外部查询服务发送任何 API Key、密码或私有业务数据。
 
-## 什么时候问用户
+## 何时必须停下来问用户
 
-- 只有在答案会改变产品范围、用户数据/费用、安全边界、对外服务或不可逆行为时，才暂停并询问。
-- 其他排版、归档、链接和文档拆分按本文件与当前上下文直接处理。
+- 涉及改变产品核心功能范围、删减或新增核心业务模块时。
+- 涉及调整用户鉴权范围、放开匿名调用收费 AI/生图接口、修改用户数据隔离规则、或变更生产安全红线时。
+- 涉及更换数据库/队列/对象存储选型、更换部署方式、或执行不可逆的数据/环境操作时。
+- 若只是文件归档、文档内链修复、代码内边界加固或按既有文档补测试，按本规则直接处理并记录到交接清单。
 
-## 每轮结束时
+## 每轮结束时（必须交接）
 
-- 更新 `docs/session-handoff.md`：日期、当前阶段、做了什么、验证结果、未决项和下一步。
-- 如果改动 OpenSpec 文档，运行 `openspec validate --all --no-interactive`。
-- 不把静态检查说成完整产品流程验证；未执行的检查明确标记为未执行。
-
-## OpenSpec 工作流
-
-- 本仓库已经初始化 OpenSpec，根目录是 `openspec/`；Artifacts 默认中文，结构标题和 MUST/WHEN/THEN 保持英文。
-- 在 Codex 里可以用 `$openspec` 选择工作流，也可以在打开本仓库时直接调用：
-  - `$openspec-explore`：讨论和调查。
-  - `$openspec-propose`：新建完整变更计划。
-  - `$openspec-update-change`：修订现有计划。
-  - `$openspec-apply-change`：实施选定变更。
-  - `$openspec-sync-specs`：同步稳定规格。
-  - `$openspec-archive-change`：归档完成的变更。
-- OpenSpec CLI 命令从仓库根目录运行。`$` 后面是 skill 名；终端里的 `openspec` 是 CLI 命令。
+1. 更新 [`docs/session-handoff.md`](docs/session-handoff.md)：写明日期、当前阶段、本轮做了什么、实际执行的命令与测试通过情况（**未实际启动服务或未执行的端到端联调必须明确标记为“未实机验证”**）、未决事项与下一步计划。
+2. 不得把仅通过 Mock 测试的单元测试说成已完成真实公网域名、真实外部模型或完整 Compose 端到端联调。

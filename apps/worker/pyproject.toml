@@ -1,0 +1,29 @@
+[project]
+name = "canvas-worker"
+version = "0.1.0"
+description = "FlowCanvas ARQ worker"
+requires-python = ">=3.12"
+dependencies = [
+    "canvas-api",
+    "langgraph>=1.0,<2",
+    "langgraph-checkpoint-postgres>=3,<4",
+    "langgraph-checkpoint-sqlite>=3,<4",
+    "psycopg[binary,pool]>=3.2,<4",
+]
+
+[tool.uv.sources]
+canvas-api = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["canvas_worker"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]

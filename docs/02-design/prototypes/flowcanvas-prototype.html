@@ -1,0 +1,2205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FlowCanvas — 暖象牙美术馆风格交互原型 v6</title>
+  <style>
+    :root {
+      --bg-canvas: #f6f5f2;
+      --surface-glass: rgba(255, 255, 255, 0.90);
+      --surface-solid: #ffffff;
+      --surface-muted: #efede8;
+      --surface-input: #f9f8f5;
+      --border-hairline: rgba(20, 20, 19, 0.08);
+      --border-strong: rgba(20, 20, 19, 0.16);
+      --text-primary: #141413;
+      --text-secondary: #5c5b57;
+      --text-muted: #939088;
+      --obsidian: #141413;
+      --obsidian-hover: #2c2c29;
+      --sapphire: #2563eb;
+      --sapphire-soft: rgba(37, 99, 235, 0.10);
+      --emerald: #047857;
+      --emerald-soft: rgba(4, 120, 87, 0.09);
+      --amber: #b45309;
+      --amber-soft: rgba(180, 83, 9, 0.10);
+      --red: #dc2626;
+      --shadow-float: 0 12px 36px rgba(20, 20, 19, 0.07), 0 1px 3px rgba(20, 20, 19, 0.04);
+      --shadow-card: 0 8px 24px rgba(20, 20, 19, 0.05), 0 1px 2px rgba(20, 20, 19, 0.03);
+      --radius-pill: 999px;
+      --radius-xl: 20px;
+      --radius-lg: 14px;
+      --radius-md: 10px;
+      --radius-sm: 8px;
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+      --font-sans: "PingFang SC", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif;
+      --font-serif: "Songti SC", "Georgia", "Times New Roman", serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
+    html, body { height: 100%; background: var(--bg-canvas); color: var(--text-primary); font-family: var(--font-sans); overflow: hidden; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; border: 0; background: transparent; }
+    svg { display: block; flex-shrink: 0; }
+
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(20, 20, 19, 0.14); border-radius: 99px; }
+
+    .app-shell {
+      position: relative; height: 100vh; width: 100vw; overflow: hidden;
+      background-color: var(--bg-canvas);
+      background-image: radial-gradient(circle, rgba(20, 20, 19, 0.11) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+    .view-panel { display: none; width: 100%; height: 100%; position: relative; }
+    .view-panel.active { display: block; }
+    .view-scroll { overflow-y: auto; height: 100%; padding-bottom: 84px; scroll-behavior: smooth; }
+
+    /* Quiet Bottom-Left Prototype Switcher */
+    .proto-float-dock {
+      position: fixed; left: 14px; bottom: 14px; z-index: 900;
+      display: inline-flex; align-items: center; gap: 4px; padding: 4px 6px;
+      background: rgba(20, 20, 19, 0.88); color: #f4f4f1;
+      backdrop-filter: blur(12px); border-radius: var(--radius-pill);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); font-size: 11px;
+    }
+    .proto-float-label { padding: 0 6px; color: #b5b2a9; font-weight: 600; }
+    .proto-tab { padding: 4px 9px; border-radius: var(--radius-pill); color: #d6d3cb; white-space: nowrap; transition: .15s; }
+    .proto-tab:hover { color: #ffffff; background: rgba(255, 255, 255, 0.10); }
+    .proto-tab.active { background: #ffffff; color: #141413; font-weight: 600; }
+    .proto-auth-btn { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: var(--radius-pill); background: rgba(255, 255, 255, 0.10); color: #ffffff; margin-left: 2px; white-space: nowrap; }
+    .auth-dot { width: 6px; height: 6px; border-radius: 50%; background: #34d399; }
+    .auth-dot.off { background: #fbbf24; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 7px 14px; border-radius: var(--radius-pill);
+      font-size: 12.5px; font-weight: 550; transition: background .15s, border-color .15s;
+      border: 1px solid var(--border-hairline);
+      background: var(--surface-solid); color: var(--text-primary);
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .btn:hover:not(:disabled) { border-color: var(--border-strong); background: #faf9f6; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-obsidian { background: var(--obsidian); color: #ffffff; border-color: transparent; }
+    .btn-obsidian:hover:not(:disabled) { background: var(--obsidian-hover); }
+    .btn-sm { padding: 5px 11px; font-size: 11.5px; }
+
+    .icon-btn {
+      position: relative;
+      width: 32px; height: 32px; border-radius: var(--radius-sm);
+      display: grid; place-items: center; color: var(--text-secondary);
+      transition: background .15s, color .15s; flex-shrink: 0;
+    }
+    .icon-btn:hover:not(:disabled) { background: rgba(20, 20, 19, 0.06); color: var(--text-primary); }
+    .icon-btn.active { background: var(--obsidian); color: #ffffff; }
+    .icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .icon-btn.danger:hover:not(:disabled) { color: var(--red); background: rgba(220, 38, 38, 0.08); }
+
+    /* Hover-only Crisp Tooltip (Shows tool name + PS shortcuts ONLY on hover!) */
+    [data-tip]:hover::after {
+      content: attr(data-tip);
+      position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
+      padding: 5px 9px; border-radius: 7px;
+      background: rgba(20, 20, 19, 0.92); color: #ffffff;
+      font-size: 11px; font-weight: 500; white-space: nowrap;
+      pointer-events: none; z-index: 400;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.16);
+    }
+
+    /* Shared Top Nav */
+    .studio-nav {
+      position: sticky; top: 14px; z-index: 40;
+      width: min(1080px, calc(100vw - 32px));
+      margin: 14px auto 0; height: 54px;
+      display: flex; align-items: center; justify-content: space-between; padding: 0 18px;
+      background: var(--surface-glass); backdrop-filter: blur(20px);
+      border: 1px solid var(--border-hairline); border-radius: var(--radius-pill);
+      box-shadow: var(--shadow-float);
+    }
+    .brand-logo { display: inline-flex; align-items: center; gap: 9px; font-weight: 650; font-size: 14px; letter-spacing: -0.2px; white-space: nowrap; }
+    .brand-mark { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; background: var(--obsidian); color: #ffffff; }
+    .nav-links { display: flex; align-items: center; gap: 4px; }
+    .nav-link { padding: 6px 14px; border-radius: var(--radius-pill); font-size: 12.5px; color: var(--text-secondary); transition: .15s; white-space: nowrap; }
+    .nav-link:hover { color: var(--text-primary); background: rgba(20, 20, 19, 0.04); }
+    .nav-link.active { color: var(--text-primary); background: var(--surface-muted); font-weight: 600; }
+    .avatar-pill {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 4px 11px 4px 5px; border-radius: var(--radius-pill);
+      border: 1px solid var(--border-hairline); background: var(--surface-solid);
+      font-size: 12px; color: var(--text-secondary); white-space: nowrap; box-shadow: var(--shadow-card);
+    }
+    .avatar-pill:hover { border-color: var(--border-strong); color: var(--text-primary); }
+    .avatar-dot { width: 22px; height: 22px; border-radius: 50%; background: var(--obsidian); color: #ffffff; display: grid; place-items: center; font-size: 10.5px; font-weight: 650; }
+
+    /* ==================== 1. INFINITE CANVAS ==================== */
+    .canvas-stage { position: absolute; inset: 0; user-select: none; background-image: radial-gradient(circle, rgba(20, 20, 19, 0.12) 1px, transparent 1px); }
+    .canvas-stage.mode-select { cursor: default; }
+    .canvas-stage.mode-hand { cursor: grab; }
+    .canvas-stage.panning { cursor: grabbing; }
+    .canvas-stage.mode-text { cursor: text; }
+    .canvas-stage.mode-brush { cursor: crosshair; }
+
+    .canvas-world { position: absolute; left: 50%; top: 48%; transform-origin: 0 0; will-change: transform; }
+
+    .canvas-node { position: absolute; border-radius: 10px; cursor: pointer; will-change: transform; }
+    .canvas-node.anim-layout { transition: left .36s var(--ease-out), top .36s var(--ease-out), width .36s var(--ease-out), height .36s var(--ease-out); }
+    .canvas-node.dragging { z-index: 20; cursor: grabbing; }
+    .canvas-node-img { background: #ffffff; border: 1px solid rgba(20, 20, 19, 0.08); box-shadow: var(--shadow-card); overflow: hidden; }
+    .canvas-node-img img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+    .canvas-node.selected { outline: 2px solid var(--sapphire); outline-offset: 2px; box-shadow: 0 16px 36px rgba(37, 99, 235, 0.14); }
+    .node-handle { display: none; position: absolute; width: 8px; height: 8px; background: #ffffff; border: 1.8px solid var(--sapphire); border-radius: 2px; }
+    .canvas-node.selected .node-handle { display: block; }
+    .h-tl { top: -6px; left: -6px; } .h-tr { top: -6px; right: -6px; }
+    .h-bl { bottom: -6px; left: -6px; } .h-br { bottom: -6px; right: -6px; }
+    .node-title-float { position: absolute; left: 0; top: -22px; font-size: 11px; font-weight: 550; color: var(--text-secondary); white-space: nowrap; pointer-events: none; }
+    .node-dim-badge { display: none; position: absolute; left: 50%; bottom: -25px; transform: translateX(-50%); padding: 2px 8px; border-radius: var(--radius-pill); background: var(--obsidian); color: #ffffff; font-size: 10px; white-space: nowrap; }
+    .canvas-node.selected .node-dim-badge { display: block; }
+
+    .canvas-node-note {
+      background: #fdfcf9; border: 1px solid rgba(20, 20, 19, 0.16); border-top: 3px solid var(--obsidian);
+      padding: 16px 18px; box-shadow: 0 12px 30px rgba(20, 20, 19, 0.08); display: flex; flex-direction: column; justify-content: center;
+    }
+    .note-kicker { font-size: 9.5px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-muted); margin-bottom: 5px; }
+    .canvas-node-note h4 { font-family: var(--font-serif); font-size: 16px; font-weight: 700; margin-bottom: 7px; color: var(--text-primary); }
+    .canvas-node-note p { font-size: 11.5px; line-height: 1.65; color: var(--text-secondary); white-space: pre-line; }
+
+    /* Pure Text Node (Supports double-click inline editing + font/size/color!) */
+    .canvas-node-text {
+      padding: 6px 10px; border-radius: 6px;
+      border: 1px dashed transparent;
+      display: flex; align-items: flex-start;
+    }
+    .canvas-node-text:hover { border-color: rgba(20, 20, 19, 0.16); }
+    .text-content-box {
+      width: 100%; height: 100%; outline: 0; white-space: pre-wrap; word-break: break-word;
+      line-height: 1.45; cursor: inherit;
+    }
+    .canvas-node-brush { border-radius: 6px; overflow: visible; }
+    .canvas-node-brush svg { width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+
+    .canvas-node-pending {
+      background: rgba(255, 255, 255, 0.94); backdrop-filter: blur(16px);
+      border: 1.5px solid rgba(37, 99, 235, 0.35); box-shadow: 0 18px 46px rgba(37, 99, 235, 0.12);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 18px; text-align: center;
+    }
+    .pulse-ring { width: 28px; height: 28px; border-radius: 50%; border: 2.5px solid rgba(37, 99, 235, 0.18); border-top-color: var(--sapphire); animation: spin 0.85s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .marquee-box { display: none; position: fixed; z-index: 22; pointer-events: none; border: 1.5px solid var(--sapphire); background: rgba(37, 99, 235, 0.08); border-radius: 4px; }
+    .marquee-box.active { display: block; }
+    .brush-preview-svg { position: fixed; inset: 0; pointer-events: none; z-index: 23; width: 100vw; height: 100vh; }
+
+    .canvas-empty-hint { position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; max-width: 340px; }
+    .canvas-empty-hint h3 { font-family: var(--font-serif); font-size: 20px; margin-bottom: 6px; }
+    .canvas-empty-hint p { font-size: 12.5px; color: var(--text-muted); line-height: 1.6; }
+
+    /* Top-Center Capsule & Contextual Text/Brush Sub-bar */
+    .canvas-top-center {
+      position: absolute; top: 16px; left: 50%; transform: translateX(-50%); z-index: 35;
+      display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px 6px 12px;
+      background: var(--surface-glass); backdrop-filter: blur(22px);
+      border: 1px solid var(--border-hairline); border-radius: var(--radius-pill);
+      box-shadow: var(--shadow-float); width: max-content; max-width: calc(100vw - 220px);
+    }
+    .top-right-account { position: absolute; top: 18px; right: 16px; z-index: 36; }
+    .top-divider { width: 1px; height: 18px; background: var(--border-hairline); flex-shrink: 0; margin: 0 2px; }
+    .top-nav-item { padding: 5px 10px; border-radius: var(--radius-pill); font-size: 12px; color: var(--text-secondary); white-space: nowrap; transition: .15s; }
+    .top-nav-item:hover { color: var(--text-primary); background: rgba(20, 20, 19, 0.05); }
+
+    /* Inline Editable Canvas Title */
+    .canvas-title-btn {
+      font-size: 12.5px; font-weight: 600; white-space: nowrap; padding: 4px 8px; border-radius: 6px; transition: .15s;
+    }
+    .canvas-title-btn:hover { background: rgba(20, 20, 19, 0.05); }
+    .canvas-title-input {
+      font-size: 12.5px; font-weight: 600; width: 156px; padding: 3px 8px; border-radius: 6px;
+      background: #ffffff; border: 1px solid var(--obsidian); outline: 0;
+    }
+
+    .sync-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: var(--radius-pill); background: var(--surface-muted); font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+    .sync-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--emerald); }
+    .zoom-inline { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--text-secondary); }
+
+    /* Export Popover */
+    .export-wrap { position: relative; }
+    .export-menu {
+      display: none; position: absolute; top: calc(100% + 8px); right: 0; width: 176px;
+      padding: 6px; border-radius: 12px; background: var(--surface-solid);
+      border: 1px solid var(--border-hairline); box-shadow: var(--shadow-float); z-index: 60;
+      flex-direction: column; gap: 2px;
+    }
+    .export-menu.open { display: flex; }
+    .export-opt {
+      text-align: left; padding: 7px 10px; border-radius: 8px; font-size: 12px; color: var(--text-primary);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .export-opt:hover { background: var(--surface-muted); }
+
+    /* Contextual Sub-toolbar for Text / Brush right next to Left Rail */
+    .tool-subbar {
+      display: none; position: absolute; left: 72px; top: 216px; z-index: 33;
+      padding: 8px 10px; border-radius: 14px; background: var(--surface-glass); backdrop-filter: blur(20px);
+      border: 1px solid var(--border-hairline); box-shadow: var(--shadow-float);
+      flex-direction: column; gap: 8px; width: 158px; font-size: 11.5px;
+      transition: left .22s ease;
+    }
+    .tool-subbar.open { display: flex; }
+    .swatch-row { display: flex; align-items: center; gap: 6px; }
+    .swatch-dot { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid rgba(0,0,0,0.12); cursor: pointer; }
+    .swatch-dot.active { outline: 2px solid var(--sapphire); outline-offset: 1px; }
+
+    /* Left Vertical Tool Rail */
+    .left-tool-rail {
+      position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 32;
+      display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 7px 6px;
+      background: var(--surface-glass); backdrop-filter: blur(20px);
+      border: 1px solid var(--border-hairline); border-radius: var(--radius-pill);
+      box-shadow: var(--shadow-float);
+    }
+    .rail-sep { width: 20px; height: 1px; background: var(--border-hairline); margin: 2px 0; }
+
+    /* Left & Right Collapsible Drawers (Right drawer sits cleanly above bottom-right Minimap!) */
+    .left-drawer {
+      position: absolute; top: 76px; left: 72px; bottom: 96px; width: 248px; z-index: 25;
+      background: var(--surface-glass); backdrop-filter: blur(22px);
+      border: 1px solid var(--border-hairline); border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-float); display: flex; flex-direction: column; overflow: hidden;
+      transition: transform .3s var(--ease-out), opacity .22s ease;
+    }
+    .left-drawer.collapsed { transform: translateX(-290px); opacity: 0; pointer-events: none; }
+
+    .right-drawer {
+      position: absolute; top: 76px; right: 16px; bottom: 136px; width: 328px; z-index: 25;
+      background: var(--surface-glass); backdrop-filter: blur(22px);
+      border: 1px solid var(--border-hairline); border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-float); display: flex; flex-direction: column; overflow: hidden;
+      transition: transform .3s var(--ease-out), opacity .22s ease;
+    }
+    .right-drawer.collapsed { transform: translateX(360px); opacity: 0; pointer-events: none; }
+
+    .drawer-tabs { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-hairline); padding: 10px 12px 0 14px; }
+    .drawer-tab-group { display: flex; gap: 14px; }
+    .drawer-tab { padding: 5px 2px 10px; font-size: 12px; color: var(--text-muted); border-bottom: 2px solid transparent; font-weight: 550; }
+    .drawer-tab.active { color: var(--text-primary); border-bottom-color: var(--obsidian); }
+    .drawer-body { flex: 1; overflow-y: auto; scroll-behavior: smooth; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .search-input { width: 100%; height: 34px; padding: 0 11px; border-radius: var(--radius-sm); background: var(--surface-input); border: 1px solid var(--border-hairline); font-size: 12px; outline: 0; }
+    .search-input:focus { border-color: var(--obsidian); background: #ffffff; }
+
+    .layer-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px; border-radius: 9px; font-size: 12px; border: 1px solid transparent; transition: background .15s; }
+    .layer-item:hover { background: rgba(20, 20, 19, 0.045); }
+    .layer-item.selected { background: var(--sapphire-soft); border-color: rgba(37, 99, 235, 0.22); color: var(--sapphire); font-weight: 550; }
+    .layer-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; cursor: pointer; }
+    .layer-thumb { width: 24px; height: 24px; border-radius: 5px; overflow: hidden; flex-shrink: 0; border: 1px solid var(--border-hairline); background: #fff; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+    .layer-thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+    .mini-asset-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .mini-asset-card { border-radius: 9px; overflow: hidden; border: 1px solid var(--border-hairline); background: var(--surface-solid); cursor: pointer; transition: .15s; }
+    .mini-asset-card:hover { border-color: var(--obsidian); transform: translateY(-2px); box-shadow: var(--shadow-card); }
+    .mini-asset-card img { height: 82px; width: 100%; object-fit: cover; display: block; }
+    .mini-asset-card .meta { padding: 6px 8px; font-size: 10.5px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* Right AI Agent Drawer */
+    .agent-head { padding: 12px 14px; border-bottom: 1px solid var(--border-hairline); display: flex; align-items: center; justify-content: space-between; }
+    .sse-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--sapphire-soft); color: var(--sapphire); font-weight: 550; }
+    .agent-body { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; padding: 14px; display: flex; flex-direction: column; gap: 11px; }
+    .goal-bubble { background: var(--surface-muted); border-radius: 12px; padding: 10px 12px; font-size: 12px; line-height: 1.55; flex-shrink: 0; }
+    .thinking-card { border: 1px solid var(--border-hairline); border-radius: 12px; background: var(--surface-solid); overflow: visible; flex-shrink: 0; }
+    .thinking-header { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; font-size: 11.5px; font-weight: 550; color: var(--text-secondary); }
+    .thinking-body { padding: 9px 12px 11px; font-size: 11.5px; line-height: 1.6; color: var(--text-secondary); border-top: 1px solid var(--border-hairline); }
+    .thinking-card.collapsed .thinking-body { display: none; }
+    .tool-call-card { border: 1px solid var(--border-hairline); border-radius: 11px; background: var(--surface-solid); padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; box-shadow: 0 2px 8px rgba(20,20,19,0.03); flex-shrink: 0; }
+    .tool-call-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .tool-call-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; }
+    .tool-status { font-size: 10.5px; padding: 2px 7px; border-radius: var(--radius-pill); font-weight: 550; }
+    .status-done { background: var(--emerald-soft); color: var(--emerald); }
+    .status-pending { background: var(--sapphire-soft); color: var(--sapphire); }
+    .tool-desc { font-size: 11.5px; color: var(--text-secondary); line-height: 1.5; }
+    .tool-json-toggle { align-self: flex-start; font-size: 10.5px; color: var(--text-muted); }
+    .tool-json-box { display: none; font-family: var(--font-mono); font-size: 10.5px; padding: 7px 9px; border-radius: 7px; background: var(--surface-input); border: 1px solid var(--border-hairline); color: var(--text-secondary); white-space: pre-wrap; }
+    .tool-call-card.show-json .tool-json-box { display: block; }
+    .proposal-bar { border: 1px solid var(--border-strong); background: #faf9f6; border-radius: 12px; padding: 11px 12px; display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+
+    /* Bottom-Right Collapsible Global Minimap */
+    .minimap-card {
+      position: absolute; right: 16px; bottom: 18px; z-index: 34;
+      width: 168px; height: 106px;
+      background: var(--surface-glass); backdrop-filter: blur(20px);
+      border: 1px solid var(--border-hairline); border-radius: 12px;
+      box-shadow: var(--shadow-float); overflow: hidden;
+      display: flex; flex-direction: column;
+      transition: width .2s, height .2s;
+    }
+    .minimap-card.collapsed { width: 40px; height: 40px; border-radius: 50%; }
+    .minimap-head {
+      height: 22px; padding: 0 7px; display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid var(--border-hairline); font-size: 10px; color: var(--text-muted);
+    }
+    .minimap-card.collapsed .minimap-head { height: 100%; justify-content: center; border-bottom: 0; padding: 0; }
+    .minimap-card.collapsed .minimap-label, .minimap-card.collapsed .minimap-viewport-box { display: none; }
+    .minimap-viewport-box { position: relative; flex: 1; background: rgba(246, 245, 242, 0.7); cursor: crosshair; overflow: hidden; }
+    .minimap-item { position: absolute; border-radius: 2px; background: rgba(20, 20, 19, 0.16); border: 1px solid rgba(20, 20, 19, 0.18); pointer-events: none; }
+    .minimap-item.img { background: rgba(180, 140, 95, 0.35); border-color: rgba(140, 100, 60, 0.4); }
+    .minimap-view-rect { position: absolute; border: 1.5px solid var(--sapphire); background: rgba(37, 99, 235, 0.09); border-radius: 2px; pointer-events: none; }
+
+    /* Bottom-Center Creation Dock */
+    .bottom-dock { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 35; width: min(610px, calc(100vw - 240px)); }
+    .prompt-dock {
+      position: relative; width: 100%;
+      background: var(--surface-glass); backdrop-filter: blur(24px);
+      border: 1px solid var(--border-hairline); border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-float);
+      padding: 11px 14px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .ref-strip { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .ref-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px 3px 4px; border-radius: var(--radius-pill); background: var(--surface-muted); border: 1px solid var(--border-hairline); font-size: 11px; color: var(--text-secondary); }
+    .ref-chip img { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; }
+    .ref-idx { background: var(--obsidian); color: #ffffff; font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: var(--radius-pill); }
+    .clear-refs-btn { font-size: 11px; color: var(--text-muted); padding: 3px 8px; border-radius: var(--radius-pill); border: 1px dashed var(--border-strong); }
+    .clear-refs-btn:hover { color: var(--text-primary); border-color: var(--obsidian); }
+    .prompt-input { width: 100%; min-height: 36px; max-height: 84px; resize: none; border: 0; background: transparent; outline: 0; font-size: 13px; line-height: 1.5; color: var(--text-primary); }
+    .prompt-input::placeholder { color: var(--text-muted); }
+    .prompt-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .mode-pills { display: inline-flex; padding: 3px; border-radius: var(--radius-pill); background: var(--surface-muted); }
+    .mode-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: var(--radius-pill); font-size: 11.5px; color: var(--text-secondary); transition: .15s; }
+    .mode-pill.active { background: var(--obsidian); color: #ffffff; font-weight: 550; }
+    .param-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: var(--radius-pill); background: var(--surface-solid); border: 1px solid var(--border-hairline); font-size: 11.5px; color: var(--text-secondary); }
+    .param-btn:hover { border-color: var(--border-strong); color: var(--text-primary); }
+    .send-circle { width: 34px; height: 34px; border-radius: 50%; background: var(--obsidian); color: #ffffff; display: grid; place-items: center; transition: .15s; }
+    .send-circle:hover { background: var(--obsidian-hover); transform: scale(1.04); }
+
+    .params-popover {
+      display: none; position: absolute; bottom: calc(100% + 10px); right: 0;
+      width: 360px; max-width: calc(100vw - 32px); max-height: 56vh; overflow-y: auto;
+      padding: 16px; border-radius: 16px; background: var(--surface-solid);
+      border: 1px solid var(--border-hairline); box-shadow: var(--shadow-float); z-index: 50;
+    }
+    .params-popover.open { display: flex; flex-direction: column; gap: 12px; }
+    .param-row { display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; color: var(--text-secondary); }
+    .chip-group { display: flex; flex-wrap: wrap; gap: 5px; }
+    .chip { padding: 4px 10px; border-radius: var(--radius-pill); font-size: 11px; border: 1px solid var(--border-hairline); background: var(--surface-input); }
+    .chip.active { background: var(--obsidian); border-color: var(--obsidian); color: #ffffff; }
+    .mode-banner { padding: 7px 10px; border-radius: 9px; font-size: 11px; line-height: 1.5; background: var(--sapphire-soft); color: var(--sapphire); }
+    .mode-banner.warn { background: var(--amber-soft); color: var(--amber); }
+
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(10px); z-index: 950; padding: 9px 16px; border-radius: var(--radius-pill); background: var(--obsidian); color: #ffffff; font-size: 12px; box-shadow: var(--shadow-float); opacity: 0; pointer-events: none; transition: all .25s var(--ease-out); }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* ==================== 2. HOME / 3. ASSETS / 4. SETTINGS / 5. AUTH ==================== */
+    .page-container { max-width: 1080px; margin: 0 auto; padding: 34px 20px; }
+    .hero-box { text-align: center; max-width: 740px; margin: 12px auto 40px; }
+    .hero-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: var(--radius-pill); background: var(--surface-solid); border: 1px solid var(--border-hairline); color: var(--text-secondary); font-size: 11.5px; margin-bottom: 14px; }
+    .hero-box h1 { font-family: var(--font-serif); font-size: 33px; font-weight: 700; letter-spacing: -0.4px; margin-bottom: 10px; }
+    .hero-box p { color: var(--text-secondary); font-size: 14px; margin-bottom: 22px; line-height: 1.6; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .section-head h2 { font-size: 16px; font-weight: 650; }
+    .cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; }
+    .canvas-card { border: 1px solid var(--border-hairline); border-radius: 16px; background: var(--surface-solid); overflow: hidden; box-shadow: var(--shadow-card); transition: .18s; }
+    .canvas-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-float); }
+    .canvas-card-cover { height: 176px; overflow: hidden; background: var(--surface-muted); display: grid; place-items: center; }
+    .canvas-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .canvas-card-body { padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; }
+    .canvas-card-body h3 { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+    .canvas-card-body small { font-size: 11.5px; color: var(--text-muted); }
+    .gate-card { border: 1px dashed var(--border-strong); border-radius: 18px; background: rgba(255,255,255,0.75); padding: 36px 24px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+
+    .assets-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+    .asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+    .asset-tile { border: 1px solid var(--border-hairline); border-radius: 14px; background: var(--surface-solid); overflow: hidden; box-shadow: var(--shadow-card); }
+    .asset-tile img { width: 100%; height: 176px; object-fit: cover; display: block; }
+    .asset-tile-foot { padding: 11px 13px; display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
+
+    .settings-grid { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+    .settings-nav { background: var(--surface-solid); border: 1px solid var(--border-hairline); border-radius: 16px; padding: 10px; box-shadow: var(--shadow-card); display: flex; flex-direction: column; gap: 4px; }
+    .settings-nav-btn { text-align: left; padding: 9px 12px; border-radius: 9px; font-size: 12.5px; color: var(--text-secondary); }
+    .settings-nav-btn.active { background: var(--surface-muted); color: var(--text-primary); font-weight: 600; }
+    .settings-card { background: var(--surface-solid); border: 1px solid var(--border-hairline); border-radius: 18px; padding: 22px; margin-bottom: 18px; box-shadow: var(--shadow-card); }
+    .settings-card h3 { font-size: 16px; margin-bottom: 4px; }
+    .settings-card .sub { font-size: 12.5px; color: var(--text-secondary); margin-bottom: 18px; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+    .field.full { grid-column: 1 / -1; }
+    .field input, .field select { height: 38px; padding: 0 11px; border-radius: 9px; background: var(--surface-input); border: 1px solid var(--border-hairline); outline: 0; color: var(--text-primary); font-size: 12.5px; }
+    .field input:focus, .field select:focus { border-color: var(--obsidian); background: #ffffff; }
+    .role-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .role-box { padding: 12px; border-radius: 10px; background: var(--surface-input); border: 1px solid var(--border-hairline); display: flex; flex-direction: column; gap: 6px; }
+
+    .auth-wrap { position: relative; height: 100%; display: grid; place-items: center; padding: 24px; }
+    .auth-back-link { position: absolute; top: 24px; left: 28px; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); padding: 7px 13px; border-radius: var(--radius-pill); background: var(--surface-glass); border: 1px solid var(--border-hairline); }
+    .auth-card { width: min(400px, 100%); padding: 30px; border-radius: 20px; background: var(--surface-solid); border: 1px solid var(--border-hairline); box-shadow: var(--shadow-float); display: flex; flex-direction: column; gap: 16px; }
+    .auth-tabs { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border-radius: var(--radius-pill); background: var(--surface-muted); }
+    .auth-tab { padding: 6px; border-radius: var(--radius-pill); font-size: 12.5px; color: var(--text-secondary); }
+    .auth-tab.active { background: var(--surface-solid); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+
+    .modal-backdrop { display: none; position: fixed; inset: 0; z-index: 500; background: rgba(20, 20, 19, 0.32); backdrop-filter: blur(6px); place-items: center; padding: 20px; }
+    .modal-backdrop.open { display: grid; }
+    .modal-box { width: min(440px, 100%); background: var(--surface-solid); border: 1px solid var(--border-hairline); border-radius: 18px; padding: 22px; box-shadow: var(--shadow-float); display: flex; flex-direction: column; gap: 12px; }
+
+    @media (max-width: 960px) {
+      .left-drawer, .right-drawer { width: calc(100vw - 88px); max-width: 320px; }
+      .settings-grid, .form-grid, .role-cards { grid-template-columns: 1fr; }
+      .sync-chip, .top-nav-item, .top-right-account, .minimap-card, .proto-float-dock { display: none; }
+      .bottom-dock { width: calc(100vw - 88px); }
+    }
+  </style>
+</head>
+<body>
+  <input type="file" id="realFileInput" accept="image/*" multiple style="display:none;" onchange="handleFileUpload(event)" />
+
+  <div class="app-shell">
+    <!-- ==================== VIEW 1: INFINITE CANVAS ==================== -->
+    <section class="view-panel active" id="view-canvas">
+      <div class="canvas-stage mode-select" id="canvasStage">
+        <div class="canvas-world" id="canvasWorld"></div>
+        <div class="marquee-box" id="marqueeBox"></div>
+        <svg class="brush-preview-svg" id="brushPreviewSvg" style="display:none;"><path id="brushPreviewPath" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="canvas-empty-hint" id="canvasEmptyHint" style="display:none;">
+          <h3>空白无限画布</h3>
+          <p>点击左侧「文字 (T)」「画笔 (B)」「上传图片」开始创作，或在下方输入目标直出 AI 生图。</p>
+        </div>
+      </div>
+
+      <!-- Top-Center Header Capsule -->
+      <header class="canvas-top-center">
+        <button class="brand-logo" onclick="switchView('home')" title="FlowCanvas 首页">
+          <span class="brand-mark">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>
+          </span>
+          <span>FlowCanvas</span>
+        </button>
+        <span class="top-divider"></span>
+        <button class="top-nav-item" onclick="switchView('home')">画布库</button>
+        <button class="top-nav-item" onclick="openAssetsFromCanvas()">素材库</button>
+        <button class="top-nav-item" onclick="switchView('settings')">设置</button>
+        <span class="top-divider"></span>
+
+        <!-- Inline Editable Canvas Name -->
+        <button class="canvas-title-btn" id="canvasTitleBtn" onclick="startRenameCanvas()" title="点击重命名画布">Amber &amp; Concrete 企划</button>
+        <input class="canvas-title-input" id="canvasTitleInput" style="display:none;" onblur="finishRenameCanvas()" onkeydown="if(event.key==='Enter') finishRenameCanvas()" />
+
+        <span class="sync-chip"><span class="sync-dot"></span><span id="syncText">已同步 · v14</span></span>
+        <span class="top-divider"></span>
+        <div class="zoom-inline">
+          <button class="icon-btn" style="width:26px;height:26px;" onclick="setZoom(zoom - 0.1)" title="缩小">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14"/></svg>
+          </button>
+          <button onclick="fitView()" title="点击适配全画布比例" id="zoomLabel" style="min-width:42px;font-weight:550;">100%</button>
+          <button class="icon-btn" style="width:26px;height:26px;" onclick="setZoom(zoom + 0.1)" title="放大">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <button class="btn btn-sm" onclick="openHistoryModal()">版本</button>
+
+        <!-- Export Menu -->
+        <div class="export-wrap">
+          <button class="btn btn-sm" onclick="document.getElementById('exportMenu').classList.toggle('open')">导出 ▾</button>
+          <div class="export-menu" id="exportMenu">
+            <button class="export-opt" onclick="exportCanvasPng()"><span>导出整张画布 (PNG)</span><span>2x</span></button>
+            <button class="export-opt" onclick="exportSelectedImage()"><span>导出当前选中图</span><span>PNG</span></button>
+          </div>
+        </div>
+
+        <button class="btn btn-sm btn-obsidian" id="toggleRightBtn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/></svg>
+          <span>AI Agent</span>
+        </button>
+      </header>
+
+      <!-- Top-Right Compact Account Pill -->
+      <div class="top-right-account">
+        <button class="avatar-pill" onclick="switchView('auth')">
+          <span class="avatar-dot" id="canvasAvatarDot">高</span>
+          <span id="canvasAccountLabel">演示账号</span>
+        </button>
+      </div>
+
+      <!-- Left Vertical Tool Rail (Hover-only PS Shortcut Tooltips, Delete, Text, Brush, Local Align, Upload) -->
+      <nav class="left-tool-rail" aria-label="画布工具">
+        <button class="icon-btn active" id="toggleLeftBtn" data-tip="图层与素材抽屉">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+        </button>
+        <div class="rail-sep"></div>
+        <button class="icon-btn active" id="toolSelectBtn" onclick="setCanvasTool('select')" data-tip="选择 / 框选 (V)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l7.2 16 2.6-6.2L20 11.2z"/></svg>
+        </button>
+        <button class="icon-btn" id="toolHandBtn" onclick="setCanvasTool('hand')" data-tip="抓手平移画布 (H / Space)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0v4"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>
+        </button>
+        <button class="icon-btn" id="toolTextBtn" onclick="setCanvasTool('text')" data-tip="文字工具 · 点击画布放字 (T)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+        </button>
+        <button class="icon-btn" id="toolBrushBtn" onclick="setCanvasTool('brush')" data-tip="自由画笔 (B)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/></svg>
+        </button>
+        <div class="rail-sep"></div>
+        <button class="icon-btn" id="undoBtn" onclick="undoCanvas()" data-tip="撤销 (Ctrl/Cmd + Z)" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+        </button>
+        <button class="icon-btn" id="redoBtn" onclick="redoCanvas()" data-tip="重做 (Ctrl/Cmd + Shift + Z)" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+        </button>
+        <div class="rail-sep"></div>
+        <button class="icon-btn" id="alignBtn" onclick="alignSelectedObjects()" data-tip="局部网格对齐 (需选中 ≥2 项)" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        </button>
+        <button class="icon-btn" onclick="triggerRealUpload()" data-tip="上传本地图片到画布">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </button>
+        <button class="icon-btn danger" id="deleteBtn" onclick="deleteSelectedItems()" data-tip="删除选中对象 (Del / Backspace)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
+      </nav>
+
+      <!-- Contextual Text / Brush Properties Popout -->
+      <div class="tool-subbar" id="toolSubbar">
+        <div style="font-weight:600;" id="subbarTitle">文字样式</div>
+        <div id="textStyleControls" style="display:flex;flex-direction:column;gap:7px;">
+          <select id="textFontSelect" style="height:28px;border-radius:6px;border:1px solid var(--border-hairline);padding:0 6px;background:#fff;">
+            <option value="sans">现代无衬线 (PingFang)</option>
+            <option value="serif">画册衬线 (Songti)</option>
+            <option value="mono">等宽代码体 (Mono)</option>
+          </select>
+          <div class="chip-group" id="textSizeChips">
+            <button class="chip" onclick="setTextSize(16, this)">16px</button>
+            <button class="chip active" onclick="setTextSize(22, this)">22px</button>
+            <button class="chip" onclick="setTextSize(32, this)">32px</button>
+          </div>
+        </div>
+        <div id="brushStyleControls" style="display:none;flex-direction:column;gap:7px;">
+          <div class="chip-group" id="brushSizeChips">
+            <button class="chip" onclick="setBrushWidth(2, this)">细 2px</button>
+            <button class="chip active" onclick="setBrushWidth(4, this)">中 4px</button>
+            <button class="chip" onclick="setBrushWidth(8, this)">粗 8px</button>
+          </div>
+        </div>
+        <div class="swatch-row">
+          <span class="swatch-dot active" style="background:#141413;" onclick="setStrokeColor('#141413', this)"></span>
+          <span class="swatch-dot" style="background:#7c5b3e;" onclick="setStrokeColor('#7c5b3e', this)"></span>
+          <span class="swatch-dot" style="background:#2563eb;" onclick="setStrokeColor('#2563eb', this)"></span>
+          <span class="swatch-dot" style="background:#b45309;" onclick="setStrokeColor('#b45309', this)"></span>
+        </div>
+      </div>
+
+      <!-- Left Collapsible Drawer -->
+      <aside class="left-drawer" id="leftDrawer">
+        <div class="drawer-tabs">
+          <div class="drawer-tab-group">
+            <button class="drawer-tab active" id="tabLayersBtn" onclick="switchLeftTab('layers')">图层 (<span id="layerCount">4</span>)</button>
+            <button class="drawer-tab" id="tabAssetsBtn" onclick="switchLeftTab('assets')">我的素材</button>
+          </div>
+          <button class="icon-btn" style="width:26px;height:26px;margin-bottom:6px;" onclick="toggleLeftDrawer(false)" title="收起左侧面板">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="drawer-body" id="leftLayersBody">
+          <input class="search-input" placeholder="搜索画布对象..." oninput="filterLayers(this.value)" />
+          <div id="layerList" style="display:flex;flex-direction:column;gap:4px;"></div>
+        </div>
+        <div class="drawer-body" id="leftAssetsBody" style="display:none;">
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-obsidian" style="flex:1;" onclick="triggerRealUpload()">+ 上传图片</button>
+            <button class="btn btn-sm" onclick="openAssetsFromCanvas()">完整库</button>
+          </div>
+          <div class="mini-asset-grid" id="drawerAssetGrid"></div>
+        </div>
+      </aside>
+
+      <!-- Right Collapsible AI Agent Drawer -->
+      <aside class="right-drawer" id="rightDrawer">
+        <div class="agent-head">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <strong style="font-size:13px;">AI Agent</strong>
+            <span class="sse-pill">● SSE 实时流</span>
+          </div>
+          <button class="icon-btn" style="width:28px;height:28px;" onclick="toggleRightDrawer(false)" title="关闭右侧面板">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div style="padding:8px 12px;border-bottom:1px solid var(--border-hairline);background:var(--surface-input);font-size:11px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;">
+          <span id="harnessMemLabel" style="color:var(--text-secondary);">Harness 记忆 · 已记录 1 轮（阈值自动压缩）</span>
+          <button onclick="clearDemoMemory()" style="font-size:10.5px;color:var(--text-muted);">清空记忆</button>
+        </div>
+        <div class="agent-body" id="agentBody">
+          <div class="goal-bubble" id="agentGoalDisplay">
+            <strong>当前指令：</strong>结合选中的图1，生成一张素陶底座延伸场景图，并将画布元素按三列整理对齐。
+          </div>
+
+          <div class="thinking-card" id="thinkingCard">
+            <button class="thinking-header" onclick="document.getElementById('thinkingCard').classList.toggle('collapsed')">
+              <span style="display:inline-flex;align-items:center;gap:6px;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                <span id="thinkingTitle">思考过程 (Thinking) · 已思考 2.4s</span>
+              </span>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div class="thinking-body" id="thinkingBody">
+              1. 识别用户选中了「图1 · 01 / 琥珀香氛主视觉」，光线偏暖晨斜光与石灰岩肌理。<br/>
+              2. 调用 `edit_image`（单图参考模式）保持石灰岩与暖光调性生成素陶静物延展图。<br/>
+              3. 画布坐标重排通过白名单工具生成待确认提案交由用户预览应用。
+            </div>
+          </div>
+
+          <div class="tool-call-card" id="toolCard1">
+            <div class="tool-call-top">
+              <div class="tool-call-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                <span>工具调用 · AI 生图 / 改图</span>
+              </div>
+              <span class="tool-status status-done">已落画布</span>
+            </div>
+            <div class="tool-desc" id="tool1Desc">调用 `edit_image` 参考图1光影生成素陶底座延伸图，并转存至 MinIO 私有存储。</div>
+            <button class="tool-json-toggle" onclick="document.getElementById('toolCard1').classList.toggle('show-json')">查看参数详情 ▾</button>
+            <div class="tool-json-box" id="tool1Json">{"tool": "edit_image", "model": "qwen-image-2.0", "images": ["图1"], "size": "follow_reference"}</div>
+          </div>
+
+          <div class="tool-call-card" id="toolCard2">
+            <div class="tool-call-top">
+              <div class="tool-call-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                <span>工具调用 · 网格规整与说明卡</span>
+              </div>
+              <span class="tool-status status-pending" id="tool2Status">待预览应用</span>
+            </div>
+            <div class="tool-desc" id="tool2Desc">提出 3 项受限画布操作：三列等宽对齐对象、统一比例尺寸、补充视觉规范卡片。</div>
+            <button class="tool-json-toggle" onclick="document.getElementById('toolCard2').classList.toggle('show-json')">查看参数详情 ▾</button>
+            <div class="tool-json-box" id="tool2Json">{"operations": ["align_objects(grid, cols=3)", "resize_object(210x170)", "add_note(视觉规范)"]}</div>
+          </div>
+
+          <div class="proposal-bar" id="proposalCard">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <strong style="font-size:12px;">画布修改提案（3 项）</strong>
+              <span style="font-size:10.5px;color:var(--text-muted);" id="proposalStatus">尚未写入数据库</span>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-sm btn-obsidian" style="flex:1;" id="applyProposalBtn" onclick="applyDemoProposal()">应用到画布</button>
+              <button class="btn btn-sm" id="undoProposalBtn" style="display:none;flex:1;color:var(--danger);border-color:rgba(185,28,28,0.28);" onclick="revertDemoProposal()">撤销此批方案</button>
+              <button class="btn btn-sm" id="rejectProposalBtn" onclick="rejectDemoProposal()">忽略并记住</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Bottom-Right Collapsible Global Minimap -->
+      <div class="minimap-card" id="minimapCard">
+        <div class="minimap-head">
+          <span class="minimap-label">全局缩略图</span>
+          <button class="icon-btn" style="width:18px;height:18px;" onclick="document.getElementById('minimapCard').classList.toggle('collapsed')" title="展开/收起全局小地图">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/></svg>
+          </button>
+        </div>
+        <div class="minimap-viewport-box" id="minimapBox"></div>
+      </div>
+
+      <!-- Bottom-Center Creation Dock -->
+      <div class="bottom-dock">
+        <div class="prompt-dock">
+          <div class="params-popover" id="paramsPopover">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <strong style="font-size:12.5px;" id="popoverTitle">生图参数（单图编辑模式）</strong>
+              <button class="btn btn-sm btn-obsidian" onclick="toggleParamsPopover(false)">完成</button>
+            </div>
+            <div class="mode-banner" id="providerRuleBanner">
+              百炼 qwen-image-2.0 单图编辑：默认对齐参考图比例，可手动覆盖尺寸。
+            </div>
+            <div class="param-row">
+              <span>生图模型（设置页 BYOK）</span>
+              <select id="imgModelSelect" style="height:34px;background:var(--surface-input);border:1px solid var(--border-hairline);border-radius:8px;padding:0 8px;">
+                <option value="qwen-image-2.0">阿里百炼 · qwen-image-2.0（最多 3 图）</option>
+                <option value="gpt-image-1">OpenAI · gpt-image-1（/edits 最多 16 图）</option>
+                <option value="Kolors">硅基流动 · Kolors（仅文生图/单图）</option>
+              </select>
+            </div>
+            <div class="param-row" id="ratioParamRow">
+              <span>输出画面比例</span>
+              <div class="chip-group" id="ratioChips">
+                <button class="chip active" onclick="pickChip(this)">跟随图1比例</button>
+                <button class="chip" onclick="pickChip(this)">3:4</button>
+                <button class="chip" onclick="pickChip(this)">1:1</button>
+                <button class="chip" onclick="pickChip(this)">16:9</button>
+              </div>
+            </div>
+            <div class="param-row" id="fidelityRow">
+              <span>参考图还原度（OpenAI / 多图适用）</span>
+              <div class="chip-group">
+                <button class="chip active" onclick="pickChip(this)">高保真 (high)</button>
+                <button class="chip" onclick="pickChip(this)">平衡创意 (low)</button>
+              </div>
+            </div>
+            <div class="param-row" id="transparentRow" style="display:none;">
+              <span>透明背景（OpenAI 适用）</span>
+              <div class="chip-group">
+                <button class="chip active" onclick="pickChip(this)">标准背景</button>
+                <button class="chip" onclick="pickChip(this)">透明 PNG</button>
+              </div>
+            </div>
+            <div class="param-row">
+              <span>生成张数</span>
+              <div class="chip-group">
+                <button class="chip active" onclick="pickChip(this)">1 张</button>
+                <button class="chip" onclick="pickChip(this)">2 张</button>
+                <button class="chip" onclick="pickChip(this)">4 张</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="ref-strip" id="refStrip"></div>
+          <textarea class="prompt-input" id="dockPrompt" placeholder="描述你想生成的画面（点选画布图片可自动静默引用为 图1 / 图2），或切到 AI Agent 协同创作…"></textarea>
+          <div class="prompt-footer">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div class="mode-pills">
+                <button class="mode-pill active" id="modeImageBtn" onclick="setDockMode('image')">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                  <span>直接生图 / 改图</span>
+                </button>
+                <button class="mode-pill" id="modeAgentBtn" onclick="setDockMode('agent')">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/></svg>
+                  <span>AI Agent</span>
+                </button>
+              </div>
+              <button class="param-btn" id="paramSummaryBtn" onclick="toggleParamsPopover()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.79 1.02 1.44 1.09H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <span id="paramSummaryText">单图编辑 · qwen-image-2.0 · 跟随图1</span>
+              </button>
+            </div>
+            <button class="send-circle" onclick="submitDockPrompt()" title="提交">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 2: HOME ==================== -->
+    <section class="view-panel" id="view-home">
+      <div class="view-scroll">
+        <nav class="studio-nav">
+          <div class="brand-logo">
+            <span class="brand-mark">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>
+            </span>
+            <span>FlowCanvas</span>
+          </div>
+          <div class="nav-links">
+            <button class="nav-link active" onclick="switchView('home')">我的画布</button>
+            <button class="nav-link" onclick="openAssetsFromHome()">素材库</button>
+            <button class="nav-link" onclick="switchView('settings')">模型与生图设置</button>
+          </div>
+          <button class="avatar-pill" onclick="switchView('auth')">
+            <span class="avatar-dot" id="homeAvatarDot">高</span>
+            <span id="homeAccountLabel">高维磊 · 演示账号</span>
+          </button>
+        </nav>
+
+        <div class="page-container">
+          <div class="hero-box">
+            <div class="hero-pill">AI 无限画布 · 直接生图改图 · LangGraph 创意 Agent</div>
+            <h1>从一张参考图或一句灵感开始创作</h1>
+            <p>支持在首页上传 0/1/2 张参考图并按图数动态配置生图参数直接入画布，也可自定义名称新建空白画布。</p>
+
+            <div class="prompt-dock" style="text-align:left;background:var(--surface-solid);">
+              <div class="ref-strip" id="homeRefStrip"></div>
+              <textarea class="prompt-input" id="homeGoalInput" placeholder="输入创作目标（如：把图1的香氛瓶放到图2的混凝土阳光走廊中，保持暖晨斜光）..."></textarea>
+              <div class="prompt-footer">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                  <button class="param-btn" onclick="cycleHomeRefs()">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                    <span id="homeRefBtnLabel">+ 添加参考图 (0张)</span>
+                  </button>
+                  <select id="homeRatioSelect" class="param-btn" style="outline:0;cursor:pointer;">
+                    <option value="3:4">比例 3:4</option>
+                    <option value="1:1">比例 1:1</option>
+                    <option value="16:9">比例 16:9</option>
+                  </select>
+                  <select id="homeModelSelect" class="param-btn" style="outline:0;cursor:pointer;" onchange="updateHomeParamsUI()">
+                    <option value="qwen-image-2.0">qwen-image-2.0</option>
+                    <option value="gpt-image-1">gpt-image-1</option>
+                    <option value="Kolors">Kolors (仅≤1图)</option>
+                  </select>
+                  <span id="homeModeHint" style="font-size:11px;color:var(--sapphire);">纯文生图参数</span>
+                </div>
+                <div style="display:flex;gap:8px;">
+                  <button class="btn" onclick="promptNewBlankCanvas()">+ 新建空白画布</button>
+                  <button class="btn btn-obsidian" onclick="createFromHome()">生成并进入画布 →</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section-head">
+            <h2>我的画布空间</h2>
+            <button class="btn btn-sm" id="homeBlankTopBtn" onclick="promptNewBlankCanvas()">+ 新建空白画布</button>
+          </div>
+
+          <div class="cards-grid" id="homeLoggedInGrid"></div>
+
+          <div class="gate-card" id="homeLoggedOutGate" style="display:none;">
+            <strong style="font-size:15px;">登录后管理你的云端画布空间</strong>
+            <p style="font-size:12.5px;color:var(--text-secondary);max-width:420px;">你的画布、MinIO 私有图片素材和加密 BYOK 密钥均按账户严格隔离保存。未登录状态下可先在上方输入创作目标，点击生成后登录即可自动延续。</p>
+            <div style="display:flex;gap:10px;margin-top:4px;">
+              <button class="btn btn-obsidian" onclick="switchView('auth')">登录 / 注册账号</button>
+              <button class="btn" onclick="toggleSimulatedAuth(true)">切换为已登录预览</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 3: ASSETS ==================== -->
+    <section class="view-panel" id="view-assets">
+      <div class="view-scroll">
+        <nav class="studio-nav">
+          <div class="brand-logo">
+            <span class="brand-mark">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>
+            </span>
+            <span>FlowCanvas</span>
+          </div>
+          <div class="nav-links">
+            <button class="nav-link" onclick="switchView('home')">我的画布</button>
+            <button class="nav-link active" onclick="switchView('assets')">素材库</button>
+            <button class="nav-link" onclick="switchView('settings')">模型与生图设置</button>
+          </div>
+          <button class="btn btn-sm btn-obsidian" id="assetsReturnBtn" onclick="returnToSourceCanvas()">← 返回画布</button>
+        </nav>
+
+        <div class="page-container">
+          <div id="assetsLoggedInView">
+            <div class="assets-toolbar">
+              <div>
+                <h2 style="font-size:20px;margin-bottom:4px;">私有图片素材库（MinIO 存储）</h2>
+                <p style="font-size:12.5px;color:var(--text-secondary);" id="assetsContextHint">上传或选择图片后点击「上画布」，将自动回到刚刚的画布并插入该素材。</p>
+              </div>
+              <div style="display:flex;gap:8px;">
+                <input class="search-input" style="width:200px;background:#fff;" placeholder="搜索素材名称..." />
+                <button class="btn btn-obsidian" onclick="triggerRealUpload(true)">+ 上传本地图片</button>
+              </div>
+            </div>
+            <div class="asset-grid" id="fullAssetGrid"></div>
+          </div>
+
+          <div class="gate-card" id="assetsLoggedOutGate" style="display:none;margin-top:32px;">
+            <strong style="font-size:15px;">私有素材库需要登录后访问</strong>
+            <p style="font-size:12.5px;color:var(--text-secondary);max-width:420px;">所有图片存储在 MinIO 私有桶中，访问 `/api/assets` 强制校验 Session 与所有权隔离。</p>
+            <button class="btn btn-obsidian" onclick="switchView('auth')">前往登录</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 4: SETTINGS ==================== -->
+    <section class="view-panel" id="view-settings">
+      <div class="view-scroll">
+        <nav class="studio-nav">
+          <div class="brand-logo">
+            <span class="brand-mark">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>
+            </span>
+            <span>FlowCanvas</span>
+          </div>
+          <div class="nav-links">
+            <button class="nav-link" onclick="switchView('home')">我的画布</button>
+            <button class="nav-link" onclick="openAssetsFromHome()">素材库</button>
+            <button class="nav-link active" onclick="switchView('settings')">模型与生图设置</button>
+          </div>
+          <button class="btn btn-sm btn-obsidian" onclick="returnToSourceCanvas()">返回画布</button>
+        </nav>
+
+        <div class="page-container">
+          <div class="settings-grid">
+            <aside class="settings-nav">
+              <button class="settings-nav-btn active">1. 语言模型（AI Agent）</button>
+              <button class="settings-nav-btn active">2. AI 生图 / 改图服务</button>
+              <div style="padding:12px 10px 4px;font-size:11px;color:var(--text-muted);line-height:1.6;">
+                BYOK 密钥服务端加密落库且绝不回显；自定义 Base URL 强制校公网 HTTPS 防 SSRF。
+              </div>
+            </aside>
+            <div>
+              <div class="settings-card">
+                <h3>语言模型接口（AI Agent 推理与工具调用）</h3>
+                <p class="sub">支持 DeepSeek、硅基流动、OpenAI 官方或任意 OpenAI 兼容 HTTPS 接口。</p>
+                <div class="form-grid">
+                  <label class="field"><span>服务商预设</span><select><option>硅基流动 SiliconFlow</option><option>OpenAI 兼容接口（通用）</option><option>DeepSeek 官方</option></select></label>
+                  <label class="field"><span>默认模型 ID</span><input value="deepseek-ai/DeepSeek-V3" /></label>
+                  <label class="field"><span>HTTPS Base URL</span><input value="https://api.siliconflow.cn/v1" /></label>
+                  <label class="field"><span>API Key（服务端加密保存）</span><input type="password" value="sk-demo-configured-key" /></label>
+                </div>
+                <div style="display:flex;gap:10px;margin-top:16px;">
+                  <button class="btn" onclick="this.textContent='模型连接正常 (208ms)'">测试语言模型连接</button>
+                  <button class="btn btn-obsidian" onclick="showToast('语言模型配置已加密保存')">保存语言模型配置</button>
+                </div>
+              </div>
+
+              <div class="settings-card">
+                <h3>AI 生图 / 改图服务配置（BYOK 生图引擎）</h3>
+                <p class="sub">支持直接文生图与 1–3 张参考图改图，结果校验后写入 MinIO 并自动加载入画布。</p>
+                <div class="form-grid">
+                  <label class="field"><span>生图协议适配器</span><select><option>阿里百炼 DashScope (qwen-image-2.0)</option><option>硅基流动 SiliconFlow (Kolors / FLUX)</option><option>OpenAI 兼容 (/images/generations &amp; /edits)</option></select></label>
+                  <label class="field"><span>生图模型 ID</span><input value="qwen-image-2.0" /></label>
+                  <label class="field"><span>参考图改图模型（可选）</span><input value="qwen-image-2.0" placeholder="留空复用主生图模型" /></label>
+                  <label class="field"><span>HTTPS Base URL</span><input value="https://dashscope.aliyuncs.com/compatible-mode/v1" /></label>
+                  <label class="field full"><span>生图服务 API Key（服务端加密保存）</span><input type="password" value="sk-image-configured-key" /></label>
+                </div>
+                <div style="display:flex;gap:10px;margin-top:16px;">
+                  <button class="btn" onclick="this.textContent='生图接口鉴权通过'">测试生图接口</button>
+                  <button class="btn btn-obsidian" onclick="showToast('生图配置已加密保存')">保存生图配置</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 5: STANDALONE AUTH ==================== -->
+    <section class="view-panel" id="view-auth">
+      <div class="auth-wrap">
+        <button class="auth-back-link" onclick="switchView('home')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+          <span>返回首页</span>
+        </button>
+        <div class="auth-card">
+          <div class="brand-logo">
+            <span class="brand-mark">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>
+            </span>
+            <span>FlowCanvas</span>
+          </div>
+          <div class="auth-tabs">
+            <button class="auth-tab active" id="authTabLogin" onclick="setAuthTab('login')">登录</button>
+            <button class="auth-tab" id="authTabRegister" onclick="setAuthTab('register')">注册账号</button>
+          </div>
+          <div>
+            <h2 style="font-family:var(--font-serif);font-size:21px;margin-bottom:4px;" id="authHeading">欢迎回到视觉工作台</h2>
+            <p style="font-size:12px;color:var(--text-secondary);line-height:1.55;" id="authSub">仅使用唯一用户名与密码，不采集邮箱。登录成功将自动续接你刚提交的画布或生图请求。</p>
+          </div>
+          <label class="field"><span>用户名</span><input value="demo_creator" /></label>
+          <label class="field"><span>密码</span><input type="password" value="••••••••••" /></label>
+          <button class="btn btn-obsidian" style="height:40px;" id="authSubmitBtn" onclick="completeDemoLogin()">登录并继续</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Quiet Bottom-Left Prototype View Switcher (Only in standalone HTML prototype; absent in real web app) -->
+  <div class="proto-float-dock" id="protoFloatDock">
+    <span class="proto-float-label">原型预览</span>
+    <button class="proto-tab active" data-view="canvas">画布</button>
+    <button class="proto-tab" data-view="home">首页</button>
+    <button class="proto-tab" data-view="assets">素材库</button>
+    <button class="proto-tab" data-view="settings">设置</button>
+    <button class="proto-tab" data-view="auth">登录</button>
+    <button class="proto-auth-btn" id="authStateBtn" onclick="toggleSimulatedAuth()">
+      <span class="auth-dot" id="authDot"></span>
+      <span id="authStateText">已登录</span>
+    </button>
+    <button class="proto-tab" onclick="document.getElementById('protoFloatDock').style.display='none'" title="仅原型预览存在，正式网站已移除此栏">×</button>
+  </div>
+
+  <!-- New Blank Canvas Naming Modal -->
+  <div class="modal-backdrop" id="newBlankModal" onclick="if(event.target===this) closeModal('newBlankModal')">
+    <div class="modal-box">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <strong>新建空白画布</strong>
+        <button class="icon-btn" style="width:28px;height:28px;" onclick="closeModal('newBlankModal')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <label class="field">
+        <span>画布名称（进入后仍可点击顶部标题随时修改）</span>
+        <input id="newBlankNameInput" value="未命名创意画布" onkeydown="if(event.key==='Enter') confirmNewBlankCanvas()" />
+      </label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" onclick="closeModal('newBlankModal')">取消</button>
+        <button class="btn btn-obsidian" onclick="confirmNewBlankCanvas()">创建空白画布</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Clean Version History Modal (Bounded Snapshots without spamming micro-drags!) -->
+  <div class="modal-backdrop" id="historyModal" onclick="if(event.target===this) closeModal('historyModal')">
+    <div class="modal-box">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <strong>云端历史快照（仅保存关键节点）</strong>
+        <button class="btn btn-sm" onclick="saveExplicitCheckpoint()">+ 手动留档当前</button>
+      </div>
+      <div id="historyList" style="display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toastBox"></div>
+
+  <script>
+    const eyeOpenSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    const eyeOffSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+
+    const demoAssets = [
+      { id: "a1", title: "琥珀香氛主视觉", dims: "960 × 1200", src: "../../../apps/web/public/assets/sample-perfume.jpg" },
+      { id: "a2", title: "混凝土光影空间", dims: "1280 × 720", src: "../../../apps/web/public/assets/sample-architecture.jpg" },
+      { id: "a3", title: "燕麦天然亚麻肌理", dims: "1280 × 720", src: "../../../apps/web/public/assets/sample-linen.jpg" },
+      { id: "a4", title: "素陶静物底座", dims: "1200 × 900", src: "../../../apps/web/public/assets/sample-ceramic.jpg" },
+    ];
+
+    const presetItems = [
+      { id: "n1", type: "image", title: "01 / 琥珀香氛主视觉", x: -345, y: -175, w: 205, h: 260, dims: "960 × 1200", src: demoAssets[0].src, visible: true },
+      { id: "n2", type: "image", title: "02 / 混凝土光影空间", x: -115, y: -175, w: 240, h: 145, dims: "1280 × 720", src: demoAssets[1].src, visible: true },
+      { id: "n3", type: "image", title: "03 / 燕麦亚麻肌理", x: 150, y: -175, w: 215, h: 145, dims: "1280 × 720", src: demoAssets[2].src, visible: true },
+      { id: "n4", type: "note", title: "AMBER & CONCRETE", content: "• 晨光石材与温润玻璃材质呼应\n• 三栏留白画廊排版节奏\n• 支持点击任意参考图静默引用生图", x: -115, y: -10, w: 480, h: 118, visible: true },
+    ];
+
+    const canvasStore = {
+      "amber": {
+        id: "amber", title: "Amber & Concrete 企划", revision: 14,
+        items: JSON.parse(JSON.stringify(presetItems)),
+        undoStack: [], redoStack: [],
+        history: [
+          { rev: 14, label: "三栏企划基准版", time: "刚才", items: JSON.parse(JSON.stringify(presetItems)) },
+          { rev: 13, label: "主视觉与空间图快照", time: "6 分钟前", items: JSON.parse(JSON.stringify(presetItems.slice(0, 2))) },
+          { rev: 12, label: "初始单张香氛图", time: "15 分钟前", items: JSON.parse(JSON.stringify(presetItems.slice(0, 1))) },
+        ],
+      },
+      "arch": {
+        id: "arch", title: "建筑光影与空间美学调研", revision: 6,
+        items: [JSON.parse(JSON.stringify(presetItems[1]))],
+        undoStack: [], redoStack: [],
+        history: [{ rev: 6, label: "建筑空间基线", time: "昨天", items: [JSON.parse(JSON.stringify(presetItems[1]))] }],
+      },
+    };
+    let activeCanvasId = "amber";
+    let returnCanvasId = "amber";
+    let uploadTargetIsAssetsPage = false;
+
+    let isLoggedIn = true;
+    let pendingHomeIntent = null;
+    let homeRefCount = 0;
+    let selectedIds = ["n1"];
+    let refIds = ["n1"];
+    let dockMode = "image";
+    let canvasTool = "select"; // "select" | "hand" | "text" | "brush"
+    let spacePressed = false;
+    let zoom = 1;
+    let pan = { x: 0, y: 0 };
+
+    // Text & Brush styling state
+    let activeTextSize = 22;
+    let activeStrokeColor = "#141413";
+    let activeBrushWidth = 4;
+
+    function activeCanvas() { return canvasStore[activeCanvasId]; }
+    function showToast(msg) {
+      const t = document.getElementById("toastBox");
+      t.textContent = msg; t.classList.add("show");
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => t.classList.remove("show"), 2500);
+    }
+
+    // Undo/Redo tracks micro-edits ONLY (does NOT spam Version History snapshots!)
+    function pushUndoState() {
+      const c = activeCanvas();
+      c.undoStack.push(JSON.parse(JSON.stringify(c.items)));
+      if (c.undoStack.length > 40) c.undoStack.shift();
+      c.redoStack = [];
+      c.revision += 1;
+      updateToolButtons();
+    }
+    function saveCheckpoint(label) {
+      const c = activeCanvas();
+      const top = c.history[0];
+      if (top && JSON.stringify(top.items) === JSON.stringify(c.items)) return;
+      c.history.unshift({ rev: c.revision, label, time: "刚才", items: JSON.parse(JSON.stringify(c.items)) });
+      c.history = c.history.slice(0, 6);
+    }
+    function saveExplicitCheckpoint() {
+      const c = activeCanvas();
+      c.revision += 1;
+      c.history.unshift({ rev: c.revision, label: "手动留档快照", time: "刚才", items: JSON.parse(JSON.stringify(c.items)) });
+      c.history = c.history.slice(0, 6);
+      openHistoryModal();
+      showToast(`已留档当前快照 Revision #${c.revision}`);
+    }
+
+    function updateToolButtons() {
+      const c = activeCanvas();
+      document.getElementById("undoBtn").disabled = c.undoStack.length === 0;
+      document.getElementById("redoBtn").disabled = c.redoStack.length === 0;
+      document.getElementById("deleteBtn").disabled = selectedIds.length === 0;
+      document.getElementById("alignBtn").disabled = selectedIds.length < 2;
+    }
+
+    function undoCanvas() {
+      const c = activeCanvas();
+      if (!c.undoStack.length) return;
+      c.redoStack.push(JSON.parse(JSON.stringify(c.items)));
+      c.items = c.undoStack.pop();
+      selectedIds = selectedIds.filter(id => c.items.some(i => i.id === id));
+      updateToolButtons();
+      renderCanvas(); renderLayers(); renderRefs();
+      showToast("已撤销上一步操作");
+    }
+    function redoCanvas() {
+      const c = activeCanvas();
+      if (!c.redoStack.length) return;
+      c.undoStack.push(JSON.parse(JSON.stringify(c.items)));
+      c.items = c.redoStack.pop();
+      updateToolButtons();
+      renderCanvas(); renderLayers(); renderRefs();
+      showToast("已重做操作");
+    }
+
+    function deleteSelectedItems() {
+      if (!selectedIds.length) return;
+      const c = activeCanvas();
+      pushUndoState();
+      const count = selectedIds.length;
+      c.items = c.items.filter(i => !selectedIds.includes(i.id));
+      refIds = refIds.filter(id => !selectedIds.includes(id));
+      selectedIds = [];
+      updateToolButtons();
+      renderCanvas(); renderLayers(); renderRefs();
+      showToast(`已删除 ${count} 个画布对象（可 Ctrl+Z 撤销）`);
+    }
+
+    // Inline Canvas Rename
+    function startRenameCanvas() {
+      const btn = document.getElementById("canvasTitleBtn");
+      const inp = document.getElementById("canvasTitleInput");
+      inp.value = activeCanvas().title;
+      btn.style.display = "none";
+      inp.style.display = "inline-block";
+      inp.focus(); inp.select();
+    }
+    function finishRenameCanvas() {
+      const btn = document.getElementById("canvasTitleBtn");
+      const inp = document.getElementById("canvasTitleInput");
+      const next = inp.value.trim();
+      if (next) {
+        activeCanvas().title = next;
+        btn.textContent = next;
+        renderHomeCards();
+      }
+      inp.style.display = "none";
+      btn.style.display = "inline-block";
+    }
+
+    // View Switching
+    document.querySelectorAll(".proto-tab").forEach(btn => {
+      btn.addEventListener("click", () => switchView(btn.dataset.view));
+    });
+    function switchView(name) {
+      document.querySelectorAll(".view-panel").forEach(p => p.classList.remove("active"));
+      document.getElementById("view-" + name).classList.add("active");
+      document.querySelectorAll(".proto-tab").forEach(t => t.classList.toggle("active", t.dataset.view === name));
+      if (name === "home") renderHomeCards();
+    }
+
+    function openAssetsFromCanvas() {
+      returnCanvasId = activeCanvasId;
+      document.getElementById("assetsReturnBtn").textContent = `← 返回「${activeCanvas().title}」`;
+      document.getElementById("assetsContextHint").textContent = `当前来源画布：${activeCanvas().title}；上传或点击「上画布」后将自动回到该画布。`;
+      switchView("assets");
+    }
+    function openAssetsFromHome() {
+      returnCanvasId = activeCanvasId;
+      document.getElementById("assetsReturnBtn").textContent = `← 返回「${activeCanvas().title}」`;
+      switchView("assets");
+    }
+    function returnToSourceCanvas() { openCanvasById(returnCanvasId || activeCanvasId); }
+
+    function openCanvasById(id) {
+      if (!canvasStore[id]) return;
+      activeCanvasId = id;
+      const c = activeCanvas();
+      document.getElementById("canvasTitleBtn").textContent = c.title;
+      selectedIds = c.items[0] ? [c.items[0].id] : [];
+      refIds = c.items.filter(i => i.type === "image").slice(0, 1).map(i => i.id);
+      pan = { x: 0, y: 0 }; zoom = 1;
+      document.getElementById("zoomLabel").textContent = "100%";
+      updateToolButtons();
+      renderCanvas(); renderLayers(); renderRefs();
+      switchView("canvas");
+    }
+
+    function setAuthTab(mode) {
+      document.getElementById("authTabLogin").classList.toggle("active", mode === "login");
+      document.getElementById("authTabRegister").classList.toggle("active", mode === "register");
+      document.getElementById("authHeading").textContent = mode === "login" ? "欢迎回到视觉工作台" : "创建 FlowCanvas 账号";
+      document.getElementById("authSub").textContent = mode === "login"
+        ? "仅使用唯一用户名与密码，不采集邮箱。登录成功将自动续接你刚提交的画布或生图请求。"
+        : "注册后将自动为你初始化一张引导示例画布与私有素材空间。";
+      document.getElementById("authSubmitBtn").textContent = mode === "login" ? "登录并继续" : "注册并进入工作台";
+    }
+
+    function toggleSimulatedAuth(forceState) {
+      isLoggedIn = typeof forceState === "boolean" ? forceState : !isLoggedIn;
+      document.getElementById("authDot").classList.toggle("off", !isLoggedIn);
+      document.getElementById("authStateText").textContent = isLoggedIn ? "已登录" : "未登录";
+      const label = isLoggedIn ? "高维磊 · 演示账号" : "未登录 · 点击登录";
+      document.getElementById("homeAccountLabel").textContent = label;
+      document.getElementById("homeAvatarDot").textContent = isLoggedIn ? "高" : "登";
+      document.getElementById("canvasAccountLabel").textContent = isLoggedIn ? "演示账号" : "登录 / 注册";
+      document.getElementById("canvasAvatarDot").textContent = isLoggedIn ? "高" : "登";
+      document.getElementById("homeLoggedInGrid").style.display = isLoggedIn ? "grid" : "none";
+      document.getElementById("homeLoggedOutGate").style.display = isLoggedIn ? "none" : "flex";
+      document.getElementById("homeBlankTopBtn").style.display = isLoggedIn ? "inline-flex" : "none";
+      document.getElementById("assetsLoggedInView").style.display = isLoggedIn ? "block" : "none";
+      document.getElementById("assetsLoggedOutGate").style.display = isLoggedIn ? "none" : "flex";
+    }
+
+    function syncSubbarPosition() {
+      const sub = document.getElementById("toolSubbar");
+      const leftOpen = !document.getElementById("leftDrawer").classList.contains("collapsed");
+      sub.style.left = leftOpen ? "332px" : "72px";
+    }
+    function toggleLeftDrawer(forceOpen) {
+      const d = document.getElementById("leftDrawer");
+      const open = typeof forceOpen === "boolean" ? forceOpen : d.classList.contains("collapsed");
+      d.classList.toggle("collapsed", !open);
+      document.getElementById("toggleLeftBtn").classList.toggle("active", open);
+      syncSubbarPosition();
+    }
+    document.getElementById("toggleLeftBtn").onclick = () => toggleLeftDrawer();
+
+    function toggleRightDrawer(forceOpen) {
+      const d = document.getElementById("rightDrawer");
+      const open = typeof forceOpen === "boolean" ? forceOpen : d.classList.contains("collapsed");
+      d.classList.toggle("collapsed", !open);
+    }
+    document.getElementById("toggleRightBtn").onclick = () => toggleRightDrawer();
+
+    function switchLeftTab(tab) {
+      document.getElementById("tabLayersBtn").classList.toggle("active", tab === "layers");
+      document.getElementById("tabAssetsBtn").classList.toggle("active", tab === "assets");
+      document.getElementById("leftLayersBody").style.display = tab === "layers" ? "flex" : "none";
+      document.getElementById("leftAssetsBody").style.display = tab === "assets" ? "flex" : "none";
+    }
+
+    function setCanvasTool(tool) {
+      canvasTool = tool;
+      ["select", "hand", "text", "brush"].forEach(t => {
+        const el = document.getElementById("tool" + t.charAt(0).toUpperCase() + t.slice(1) + "Btn");
+        if (el) el.classList.toggle("active", tool === t);
+      });
+      const st = document.getElementById("canvasStage");
+      st.className = `canvas-stage mode-${spacePressed ? "hand" : tool}`;
+      const sub = document.getElementById("toolSubbar");
+      if (tool === "text" || tool === "brush") {
+        sub.classList.add("open");
+        syncSubbarPosition();
+        document.getElementById("subbarTitle").textContent = tool === "text" ? "文字属性" : "画笔属性";
+        document.getElementById("textStyleControls").style.display = tool === "text" ? "flex" : "none";
+        document.getElementById("brushStyleControls").style.display = tool === "brush" ? "flex" : "none";
+      } else {
+        sub.classList.remove("open");
+      }
+    }
+    function setTextSize(sz, btn) {
+      activeTextSize = sz;
+      btn.parentElement.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
+      btn.classList.add("active");
+    }
+    function setBrushWidth(w, btn) {
+      activeBrushWidth = w;
+      btn.parentElement.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
+      btn.classList.add("active");
+    }
+    function setStrokeColor(col, dot) {
+      activeStrokeColor = col;
+      dot.parentElement.querySelectorAll(".swatch-dot").forEach(d => d.classList.remove("active"));
+      dot.classList.add("active");
+    }
+
+    // Photoshop Keyboard Shortcuts (V, H, T, B, Space, Del/Backspace, Ctrl/Cmd+Z)
+    window.addEventListener("keydown", (e) => {
+      const tag = document.activeElement?.tagName;
+      const isEditing = ["INPUT", "TEXTAREA", "SELECT"].includes(tag) || document.activeElement?.isContentEditable;
+      if (isEditing) return;
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        if (!spacePressed) { spacePressed = true; setCanvasTool(canvasTool); }
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault(); deleteSelectedItems();
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault(); if (e.shiftKey) redoCanvas(); else undoCanvas();
+      } else if (e.key.toLowerCase() === "v") { setCanvasTool("select"); }
+      else if (e.key.toLowerCase() === "h") { setCanvasTool("hand"); }
+      else if (e.key.toLowerCase() === "t") { setCanvasTool("text"); }
+      else if (e.key.toLowerCase() === "b") { setCanvasTool("brush"); }
+      else if (e.key === "Escape") { selectedIds = []; renderCanvas(); renderLayers(); updateToolButtons(); }
+    });
+    window.addEventListener("keyup", (e) => {
+      if (e.code === "Space" && spacePressed) { spacePressed = false; setCanvasTool(canvasTool); }
+    });
+
+    function syncStageTransform() {
+      const world = document.getElementById("canvasWorld");
+      const st = document.getElementById("canvasStage");
+      world.style.transform = `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`;
+      const g = 24 * zoom;
+      st.style.backgroundSize = `${g}px ${g}px`;
+      st.style.backgroundPosition = `${(st.clientWidth / 2 + pan.x) % g}px ${(st.clientHeight * 0.48 + pan.y) % g}px`;
+      renderMinimap();
+    }
+
+    // Wheel Zoom centered on cursor
+    const stage = document.getElementById("canvasStage");
+    stage.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const rect = stage.getBoundingClientRect();
+      const ox = rect.width / 2, oy = rect.height * 0.48;
+      const mx = e.clientX - rect.left - ox, my = e.clientY - rect.top - oy;
+      const oldZoom = zoom;
+      zoom = Math.max(0.3, Math.min(2.2, oldZoom * (e.deltaY > 0 ? 0.92 : 1.08)));
+      pan.x = mx - (mx - pan.x) * (zoom / oldZoom);
+      pan.y = my - (my - pan.y) * (zoom / oldZoom);
+      document.getElementById("zoomLabel").textContent = Math.round(zoom * 100) + "%";
+      syncStageTransform();
+    }, { passive: false });
+
+    function setZoom(val) {
+      zoom = Math.max(0.3, Math.min(2.2, Number(val)));
+      document.getElementById("zoomLabel").textContent = Math.round(zoom * 100) + "%";
+      syncStageTransform();
+    }
+    function fitView() {
+      const items = activeCanvas().items.filter(i => i.visible);
+      if (!items.length) { zoom = 1; pan = { x: 0, y: 0 }; setZoom(1); return; }
+      const minX = Math.min(...items.map(i => i.x)), minY = Math.min(...items.map(i => i.y));
+      const maxX = Math.max(...items.map(i => i.x + i.w)), maxY = Math.max(...items.map(i => i.y + i.h));
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      const bw = Math.max(200, maxX - minX + 160), bh = Math.max(200, maxY - minY + 200);
+      zoom = Math.max(0.45, Math.min(1.2, Math.min(stage.clientWidth / bw, stage.clientHeight / bh)));
+      pan.x = -cx * zoom; pan.y = -cy * zoom;
+      document.getElementById("zoomLabel").textContent = Math.round(zoom * 100) + "%";
+      syncStageTransform();
+    }
+
+    function clientToWorld(cx, cy) {
+      const rect = stage.getBoundingClientRect();
+      return {
+        x: (cx - rect.left - rect.width / 2 - pan.x) / zoom,
+        y: (cy - rect.top - rect.height * 0.48 - pan.y) / zoom,
+      };
+    }
+
+    stage.addEventListener("mousedown", (e) => {
+      document.getElementById("exportMenu").classList.remove("open");
+      const isHand = canvasTool === "hand" || spacePressed;
+      if (isHand) {
+        const startX = e.clientX - pan.x, startY = e.clientY - pan.y;
+        stage.classList.add("panning");
+        function onMove(ev) { pan.x = ev.clientX - startX; pan.y = ev.clientY - startY; syncStageTransform(); }
+        function onUp() { stage.classList.remove("panning"); window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); }
+        window.addEventListener("mousemove", onMove); window.addEventListener("mouseup", onUp);
+        return;
+      }
+
+      if (canvasTool === "text") {
+        const pt = clientToWorld(e.clientX, e.clientY);
+        const fontChoice = document.getElementById("textFontSelect").value;
+        pushUndoState();
+        const id = "txt_" + Date.now();
+        activeCanvas().items.push({
+          id, type: "text", title: "文字图层", x: Math.round(pt.x), y: Math.round(pt.y), w: 220, h: 48,
+          content: "双击编辑文字内容", fontFamily: fontChoice, fontSize: activeTextSize, color: activeStrokeColor, visible: true
+        });
+        selectedIds = [id];
+        setCanvasTool("select");
+        updateToolButtons(); renderCanvas(); renderLayers();
+        return;
+      }
+
+      if (canvasTool === "brush") {
+        const pts = [{ x: e.clientX, y: e.clientY }];
+        const svg = document.getElementById("brushPreviewSvg");
+        const pathEl = document.getElementById("brushPreviewPath");
+        pathEl.setAttribute("stroke", activeStrokeColor);
+        pathEl.setAttribute("stroke-width", String(activeBrushWidth));
+        pathEl.setAttribute("d", `M ${e.clientX} ${e.clientY}`);
+        svg.style.display = "block";
+        function onBrushMove(ev) {
+          pts.push({ x: ev.clientX, y: ev.clientY });
+          pathEl.setAttribute("d", pts.map((p, i) => (i === 0 ? `M ${p.x} ${p.y}` : `L ${p.x} ${p.y}`)).join(" "));
+        }
+        function onBrushUp() {
+          window.removeEventListener("mousemove", onBrushMove); window.removeEventListener("mouseup", onBrushUp);
+          svg.style.display = "none";
+          if (pts.length > 2) {
+            const worldPts = pts.map(p => clientToWorld(p.x, p.y));
+            const minX = Math.min(...worldPts.map(p => p.x)), minY = Math.min(...worldPts.map(p => p.y));
+            const maxX = Math.max(...worldPts.map(p => p.x)), maxY = Math.max(...worldPts.map(p => p.y));
+            const d = worldPts.map((p, i) => `${i === 0 ? "M" : "L"} ${Math.round(p.x - minX)} ${Math.round(p.y - minY)}`).join(" ");
+            pushUndoState();
+            const id = "brush_" + Date.now();
+            activeCanvas().items.push({
+              id, type: "brush", title: "画笔涂鸦", x: Math.round(minX), y: Math.round(minY),
+              w: Math.max(24, Math.round(maxX - minX)), h: Math.max(24, Math.round(maxY - minY)),
+              pathD: d, color: activeStrokeColor, strokeWidth: activeBrushWidth, visible: true
+            });
+            selectedIds = [id];
+            updateToolButtons(); renderCanvas(); renderLayers();
+          }
+        }
+        window.addEventListener("mousemove", onBrushMove); window.addEventListener("mouseup", onBrushUp);
+        return;
+      }
+
+      if (e.target === stage) {
+        selectedIds = [];
+        updateToolButtons(); renderCanvas(); renderLayers();
+        const box = document.getElementById("marqueeBox");
+        const sx = e.clientX, sy = e.clientY;
+        box.style.left = sx + "px"; box.style.top = sy + "px"; box.style.width = "0px"; box.style.height = "0px";
+        box.classList.add("active");
+        function onMarqueeMove(ev) {
+          box.style.left = Math.min(sx, ev.clientX) + "px"; box.style.top = Math.min(sy, ev.clientY) + "px";
+          box.style.width = Math.abs(ev.clientX - sx) + "px"; box.style.height = Math.abs(ev.clientY - sy) + "px";
+        }
+        function onMarqueeUp(ev) {
+          window.removeEventListener("mousemove", onMarqueeMove); window.removeEventListener("mouseup", onMarqueeUp);
+          box.classList.remove("active");
+          const p1 = clientToWorld(Math.min(sx, ev.clientX), Math.min(sy, ev.clientY));
+          const p2 = clientToWorld(Math.max(sx, ev.clientX), Math.max(sy, ev.clientY));
+          if (p2.x - p1.x > 6 || p2.y - p1.y > 6) {
+            selectedIds = activeCanvas().items.filter(it => it.visible && it.x <= p2.x && it.x + it.w >= p1.x && it.y <= p2.y && it.y + it.h >= p1.y).map(it => it.id);
+            updateToolButtons(); renderCanvas(); renderLayers();
+          }
+        }
+        window.addEventListener("mousemove", onMarqueeMove); window.addEventListener("mouseup", onMarqueeUp);
+      }
+    });
+
+    function renderCanvas(animateLayout = false) {
+      const c = activeCanvas();
+      const world = document.getElementById("canvasWorld");
+      world.innerHTML = "";
+      document.getElementById("canvasEmptyHint").style.display = c.items.length === 0 ? "block" : "none";
+      document.getElementById("syncText").textContent = `已同步 · v${c.revision}`;
+
+      c.items.forEach(item => {
+        if (!item.visible) return;
+        const isSel = selectedIds.includes(item.id);
+        const typeCls = item.type === "image" ? "canvas-node-img" : item.type === "note" ? "canvas-node-note" : item.type === "text" ? "canvas-node-text" : item.type === "brush" ? "canvas-node-brush" : "canvas-node-pending";
+        const el = document.createElement("div");
+        el.dataset.id = item.id;
+        el.className = `canvas-node ${animateLayout ? "anim-layout" : ""} ${typeCls} ${isSel ? "selected" : ""}`;
+        el.style.left = item.x + "px"; el.style.top = item.y + "px";
+        el.style.width = item.w + "px"; el.style.height = item.h + "px";
+
+        if (item.type === "image") {
+          el.innerHTML = `
+            <div class="node-title-float">${item.title}</div>
+            <img src="${item.src}" alt="${item.title}" />
+            <div class="node-handle h-tl"></div><div class="node-handle h-tr"></div>
+            <div class="node-handle h-bl"></div><div class="node-handle h-br"></div>
+            <div class="node-dim-badge">${item.dims || `${item.w} × ${item.h}`}</div>`;
+        } else if (item.type === "note") {
+          el.innerHTML = `<div class="note-kicker">Editorial Card</div><h4>${item.title}</h4><p>${item.content}</p>`;
+        } else if (item.type === "text") {
+          const ff = item.fontFamily === "serif" ? "var(--font-serif)" : item.fontFamily === "mono" ? "var(--font-mono)" : "var(--font-sans)";
+          el.innerHTML = `<div class="text-content-box" style="font-family:${ff};font-size:${item.fontSize || 22}px;color:${item.color || '#141413'};font-weight:600;">${item.content}</div>`;
+          el.addEventListener("dblclick", (ev) => {
+            ev.stopPropagation();
+            const box = el.querySelector(".text-content-box");
+            box.contentEditable = "true"; box.focus();
+            box.onblur = () => {
+              box.contentEditable = "false";
+              const cleaned = box.innerText.trim();
+              if (!cleaned) {
+                pushUndoState();
+                activeCanvas().items = activeCanvas().items.filter(it => it.id !== item.id);
+                selectedIds = selectedIds.filter(id => id !== item.id);
+                updateToolButtons(); renderCanvas(); renderLayers();
+                showToast("文字内容已删空，自动移除空白文本框");
+                return;
+              }
+              if (box.innerText !== item.content) { pushUndoState(); item.content = box.innerText; renderLayers(); }
+            };
+          });
+        } else if (item.type === "brush") {
+          el.innerHTML = `<svg viewBox="0 0 ${item.w} ${item.h}"><path d="${item.pathD}" fill="none" stroke="${item.color || '#141413'}" stroke-width="${item.strokeWidth || 4}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+        } else {
+          el.innerHTML = `<div class="pulse-ring"></div><strong style="font-size:12px;color:var(--sapphire);">${item.title}</strong><small style="font-size:11px;color:var(--text-secondary);">${item.content}</small>`;
+        }
+
+        el.addEventListener("mousedown", (e) => {
+          if (canvasTool === "hand" || spacePressed || canvasTool === "brush" || (canvasTool === "text" && item.type !== "text")) return;
+          if (e.target.isContentEditable) return;
+          e.stopPropagation();
+          el.classList.remove("anim-layout");
+
+          let moved = false;
+          const startX = e.clientX, startY = e.clientY;
+          let dx = 0, dy = 0;
+          el.classList.add("dragging");
+
+          function onMove(ev) {
+            dx = Math.round((ev.clientX - startX) / zoom);
+            dy = Math.round((ev.clientY - startY) / zoom);
+            if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
+            el.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+          }
+          function onUp() {
+            window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp);
+            el.classList.remove("dragging");
+            if (moved && (dx !== 0 || dy !== 0)) {
+              pushUndoState();
+              item.x += dx; item.y += dy;
+              el.style.left = item.x + "px"; el.style.top = item.y + "px";
+              el.style.transform = "";
+              document.getElementById("syncText").textContent = `已同步 · v${activeCanvas().revision}`;
+              renderMinimap();
+            } else {
+              el.style.transform = "";
+              if (e.shiftKey) {
+                selectedIds = isSel ? selectedIds.filter(id => id !== item.id) : [...selectedIds, item.id];
+              } else {
+                selectedIds = [item.id];
+              }
+              if (item.type === "image" && !refIds.includes(item.id)) refIds.push(item.id);
+              world.querySelectorAll(".canvas-node").forEach(n => n.classList.toggle("selected", selectedIds.includes(n.dataset.id)));
+              updateToolButtons(); renderLayers(); renderRefs();
+            }
+          }
+          window.addEventListener("mousemove", onMove); window.addEventListener("mouseup", onUp);
+        });
+        world.appendChild(el);
+      });
+      if (animateLayout) {
+        setTimeout(() => world.querySelectorAll(".anim-layout").forEach(n => n.classList.remove("anim-layout")), 380);
+      }
+      syncStageTransform();
+    }
+
+    // Bottom-Right Minimap Rendering & Click/Drag Panning
+    function renderMinimap() {
+      const box = document.getElementById("minimapBox");
+      if (!box || document.getElementById("minimapCard").classList.contains("collapsed")) return;
+      box.innerHTML = "";
+      const items = activeCanvas().items.filter(i => i.visible);
+      const rect = stage.getBoundingClientRect();
+      const vw = (rect.width || 1440) / zoom, vh = (rect.height || 900) / zoom;
+      const vLeft = -pan.x / zoom - vw / 2, vTop = -pan.y / zoom - vh / 2;
+
+      let minX = vLeft, minY = vTop, maxX = vLeft + vw, maxY = vTop + vh;
+      items.forEach(i => {
+        minX = Math.min(minX, i.x - 100); minY = Math.min(minY, i.y - 100);
+        maxX = Math.max(maxX, i.x + i.w + 100); maxY = Math.max(maxY, i.y + i.h + 100);
+      });
+      const worldW = Math.max(800, maxX - minX), worldH = Math.max(500, maxY - minY);
+      const mw = box.clientWidth || 166, mh = box.clientHeight || 82;
+      const s = Math.min((mw - 8) / worldW, (mh - 8) / worldH);
+      const offX = (mw - worldW * s) / 2, offY = (mh - worldH * s) / 2;
+
+      items.forEach(i => {
+        const d = document.createElement("div");
+        d.className = `minimap-item ${i.type === "image" ? "img" : ""}`;
+        d.style.left = (offX + (i.x - minX) * s) + "px";
+        d.style.top = (offY + (i.y - minY) * s) + "px";
+        d.style.width = Math.max(3, i.w * s) + "px";
+        d.style.height = Math.max(3, i.h * s) + "px";
+        box.appendChild(d);
+      });
+
+      const vr = document.createElement("div");
+      vr.className = "minimap-view-rect";
+      vr.style.left = (offX + (vLeft - minX) * s) + "px";
+      vr.style.top = (offY + (vTop - minY) * s) + "px";
+      vr.style.width = Math.max(10, vw * s) + "px";
+      vr.style.height = Math.max(8, vh * s) + "px";
+      box.appendChild(vr);
+
+      box._mapInfo = { minX, minY, s, offX, offY };
+    }
+    const minimapBox = document.getElementById("minimapBox");
+    minimapBox.addEventListener("mousedown", (e) => {
+      e.stopPropagation();
+      function panFromMinimap(ev) {
+        const info = minimapBox._mapInfo;
+        if (!info) return;
+        const r = minimapBox.getBoundingClientRect();
+        const wx = info.minX + (ev.clientX - r.left - info.offX) / info.s;
+        const wy = info.minY + (ev.clientY - r.top - info.offY) / info.s;
+        pan.x = -wx * zoom; pan.y = -wy * zoom;
+        syncStageTransform();
+      }
+      panFromMinimap(e);
+      window.addEventListener("mousemove", panFromMinimap);
+      window.addEventListener("mouseup", function up() {
+        window.removeEventListener("mousemove", panFromMinimap);
+        window.removeEventListener("mouseup", up);
+      });
+    });
+
+    // Local Grid Alignment ONLY on ≥2 Selected Objects around their own current coordinates!
+    function alignSelectedObjects() {
+      if (selectedIds.length < 2) { showToast("请先框选或按住 Shift 多选至少 2 个对象再对齐"); return; }
+      const c = activeCanvas();
+      const targets = c.items.filter(i => selectedIds.includes(i.id));
+      pushUndoState();
+      const startX = Math.min(...targets.map(t => t.x));
+      const startY = Math.min(...targets.map(t => t.y));
+      const cols = Math.min(3, targets.length);
+      const colW = Math.max(...targets.map(t => t.w)) + 20;
+      const rowH = Math.max(...targets.map(t => t.h)) + 20;
+      targets.forEach((t, idx) => {
+        t.x = Math.round(startX + (idx % cols) * colW);
+        t.y = Math.round(startY + Math.floor(idx / cols) * rowH);
+      });
+      renderCanvas(true); renderLayers();
+      showToast(`已就近网格对齐选中的 ${targets.length} 个对象`);
+    }
+
+    function selectLayerSmoothly(id) {
+      selectedIds = [id];
+      const item = activeCanvas().items.find(i => i.id === id);
+      if (item) {
+        pan.x = -(item.x + item.w / 2) * zoom;
+        pan.y = -(item.y + item.h / 2) * zoom;
+        if (item.type === "image" && !refIds.includes(item.id)) { refIds.push(item.id); renderRefs(); }
+      }
+      updateToolButtons(); renderCanvas(); renderLayers();
+    }
+
+    function renderLayers(filter = "") {
+      const items = activeCanvas().items;
+      const list = document.getElementById("layerList");
+      document.getElementById("layerCount").textContent = items.length;
+      list.innerHTML = "";
+      if (!items.length) {
+        list.innerHTML = `<div style="padding:20px 8px;text-align:center;font-size:12px;color:var(--text-muted);">当前画布为空</div>`;
+        return;
+      }
+      items.filter(i => (i.title || i.content || "").toLowerCase().includes(filter.toLowerCase())).forEach(item => {
+        const row = document.createElement("div");
+        row.className = `layer-item ${selectedIds.includes(item.id) ? "selected" : ""}`;
+        const thumbContent = item.src ? `<img src="${item.src}"/>` : item.type === "text" ? "T" : item.type === "brush" ? "∿" : "▤";
+        const label = item.type === "text" ? (item.content || "文字") : item.title;
+        row.innerHTML = `
+          <div class="layer-left" onclick="selectLayerSmoothly('${item.id}')">
+            <div class="layer-thumb">${thumbContent}</div>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${label}</span>
+          </div>
+          <button class="icon-btn" style="width:26px;height:26px;" onclick="toggleVis('${item.id}')" title="显示/隐藏">${item.visible ? eyeOpenSvg : eyeOffSvg}</button>
+        `;
+        list.appendChild(row);
+      });
+    }
+    function filterLayers(val) { renderLayers(val); }
+    function toggleVis(id) {
+      const it = activeCanvas().items.find(i => i.id === id);
+      if (it) it.visible = !it.visible;
+      renderCanvas(); renderLayers();
+    }
+
+    function renderRefs() {
+      const strip = document.getElementById("refStrip");
+      strip.innerHTML = "";
+      refIds = refIds.filter(id => activeCanvas().items.some(i => i.id === id && i.src));
+      refIds.forEach((id, idx) => {
+        const item = activeCanvas().items.find(i => i.id === id);
+        if (!item) return;
+        const chip = document.createElement("span");
+        chip.className = "ref-chip";
+        chip.innerHTML = `<img src="${item.src}"/><span class="ref-idx">图${idx + 1}</span><span>${item.title}</span><button onclick="removeRef('${id}')" style="color:var(--text-muted);margin-left:2px;">×</button>`;
+        strip.appendChild(chip);
+      });
+      if (refIds.length > 0) {
+        const clr = document.createElement("button");
+        clr.className = "clear-refs-btn";
+        clr.id = "clearRefsBtn";
+        clr.textContent = "清空参考";
+        clr.onclick = clearAllRefs;
+        strip.appendChild(clr);
+      }
+      updateDynamicImageParams();
+    }
+    function removeRef(id) { refIds = refIds.filter(r => r !== id); renderRefs(); }
+    function clearAllRefs() { refIds = []; renderRefs(); showToast("已清空底栏参考图"); }
+
+    function updateDynamicImageParams() {
+      const count = refIds.length;
+      const model = document.getElementById("imgModelSelect").value;
+      const titleEl = document.getElementById("popoverTitle");
+      const bannerEl = document.getElementById("providerRuleBanner");
+      const fidelityRow = document.getElementById("fidelityRow");
+      const transparentRow = document.getElementById("transparentRow");
+      const ratioChips = document.getElementById("ratioChips");
+      const summaryEl = document.getElementById("paramSummaryText");
+
+      if (count === 0) {
+        titleEl.textContent = "生图参数（0图 · 纯文生图模式）";
+        fidelityRow.style.display = "none";
+        transparentRow.style.display = model === "gpt-image-1" ? "flex" : "none";
+        ratioChips.innerHTML = `<button class="chip active" onclick="pickChip(this)">3:4</button><button class="chip" onclick="pickChip(this)">1:1</button><button class="chip" onclick="pickChip(this)">16:9</button><button class="chip" onclick="pickChip(this)">4:3</button>`;
+        bannerEl.className = "mode-banner";
+        bannerEl.textContent = model === "qwen-image-2.0" ? "百炼纯文生图：支持自定义尺寸 (512*512 ~ 2048*2048) 与单次最多 6 张。" : model === "gpt-image-1" ? "OpenAI /images/generations：支持透明背景、高/中/低画质。" : "硅基流动 Kolors：支持自定义 image_size 与 batch_size (1~4)。";
+        summaryEl.textContent = `纯文生图 · ${model} · 3:4`;
+      } else if (count === 1) {
+        titleEl.textContent = "生图参数（1图 · 单图编辑模式）";
+        fidelityRow.style.display = "flex";
+        transparentRow.style.display = "none";
+        ratioChips.innerHTML = `<button class="chip active" onclick="pickChip(this)">跟随图1比例</button><button class="chip" onclick="pickChip(this)">3:4</button><button class="chip" onclick="pickChip(this)">1:1</button><button class="chip" onclick="pickChip(this)">16:9</button>`;
+        bannerEl.className = "mode-banner";
+        bannerEl.textContent = model === "gpt-image-1" ? "OpenAI /images/edits：解锁 input_fidelity 参考还原度（high/low）。" : model === "qwen-image-2.0" ? "百炼 qwen-image-2.0 单图编辑：默认保持图1宽高比。" : "硅基流动单图图生图：已切换为单图 image 传入模式。";
+        summaryEl.textContent = `单图编辑 · ${model} · 跟随图1`;
+      } else {
+        titleEl.textContent = `生图参数（${count}图 · 多图融合模式）`;
+        fidelityRow.style.display = model === "gpt-image-1" ? "flex" : "none";
+        transparentRow.style.display = "none";
+        ratioChips.innerHTML = `<button class="chip active" onclick="pickChip(this)">跟随最后一张图</button><button class="chip" onclick="pickChip(this)">1:1</button><button class="chip" onclick="pickChip(this)">3:4</button><button class="chip" onclick="pickChip(this)">16:9</button>`;
+        bannerEl.className = model === "Kolors" ? "mode-banner warn" : "mode-banner";
+        bannerEl.textContent = model === "Kolors" ? "警告：硅基流动 Kolors 仅支持 ≤1 张参考图，请删减或切换适配器。" : model === "qwen-image-2.0" ? "百炼多图融合（1–3 张）：按图1/图2/图3顺序理解，默认按最后一张图比例输出。" : "OpenAI /images/edits 多图阵列：最多支持 16 张参考图与 input_fidelity 控制。";
+        summaryEl.textContent = `多图融合(${count}张) · ${model}`;
+      }
+    }
+    document.getElementById("imgModelSelect").onchange = updateDynamicImageParams;
+
+    // Export Whole Canvas PNG (2x Bounding Box of all visible items + 40px ivory padding, zero UI chrome)
+    async function exportCanvasPng() {
+      document.getElementById("exportMenu").classList.remove("open");
+      const items = activeCanvas().items.filter(i => i.visible);
+      if (!items.length) { showToast("当前画布暂无可见内容可导出"); return; }
+
+      const pad = 40;
+      const scale = 2;
+      const minX = Math.min(...items.map(i => i.x)) - pad;
+      const minY = Math.min(...items.map(i => i.y)) - pad;
+      const maxX = Math.max(...items.map(i => i.x + i.w)) + pad;
+      const maxY = Math.max(...items.map(i => i.y + i.h)) + pad;
+      const w = Math.max(320, Math.round(maxX - minX));
+      const h = Math.max(240, Math.round(maxY - minY));
+
+      function drawRoundRect(ctx, x, y, rw, rh, r) {
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(x, y, rw, rh, r) : ctx.rect(x, y, rw, rh);
+        ctx.closePath();
+      }
+
+      function renderComposite(includeExternalImgs) {
+        const c = document.createElement("canvas");
+        c.width = w * scale; c.height = h * scale;
+        const ctx = c.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.fillStyle = "#f6f5f2";
+        ctx.fillRect(0, 0, w, h);
+
+        // Subtle warm dot grid inside export
+        ctx.fillStyle = "rgba(20, 20, 19, 0.10)";
+        for (let gx = 12; gx < w; gx += 24) {
+          for (let gy = 12; gy < h; gy += 24) {
+            ctx.beginPath(); ctx.arc(gx, gy, 0.9, 0, Math.PI * 2); ctx.fill();
+          }
+        }
+
+        items.forEach(item => {
+          const x = item.x - minX, y = item.y - minY;
+          if (item.type === "image") {
+            drawRoundRect(ctx, x, y, item.w, item.h, 10);
+            ctx.save(); ctx.clip();
+            const domImg = Array.from(document.querySelectorAll("#canvasWorld img")).find(im => im.alt === item.title || im.src === item.src);
+            const canDrawImg = includeExternalImgs && domImg && domImg.complete && domImg.naturalWidth > 0 && (location.protocol !== "file:" || domImg.src.startsWith("data:"));
+            if (canDrawImg) {
+              const ir = domImg.naturalWidth / domImg.naturalHeight;
+              const br = item.w / item.h;
+              const dw = ir > br ? item.h * ir : item.w;
+              const dh = ir > br ? item.h : item.w / ir;
+              ctx.drawImage(domImg, x + (item.w - dw) / 2, y + (item.h - dh) / 2, dw, dh);
+            } else {
+              ctx.fillStyle = "#ebe8e0"; ctx.fillRect(x, y, item.w, item.h);
+              ctx.fillStyle = "#5c5b57"; ctx.font = "600 12px Inter, sans-serif";
+              ctx.fillText(item.title || "图片素材", x + 14, y + 28);
+              if (location.protocol === "file:" && !domImg?.src?.startsWith("data:")) {
+                ctx.fillStyle = "#8a8882"; ctx.font = "11px Inter, sans-serif";
+                ctx.fillText("(file:// 本地演示图受同源限制)", x + 14, y + 48);
+              }
+            }
+            ctx.restore();
+            ctx.strokeStyle = "rgba(20, 20, 19, 0.12)"; ctx.lineWidth = 1;
+            drawRoundRect(ctx, x, y, item.w, item.h, 10); ctx.stroke();
+          } else if (item.type === "note") {
+            drawRoundRect(ctx, x, y, item.w, item.h, 10);
+            ctx.fillStyle = "#fdfcf9"; ctx.fill();
+            ctx.strokeStyle = "rgba(20, 20, 19, 0.16)"; ctx.lineWidth = 1; ctx.stroke();
+            ctx.fillStyle = "#141413"; ctx.fillRect(x, y, item.w, 3);
+            ctx.font = "700 15px Georgia, serif"; ctx.fillText(item.title || "", x + 18, y + 36);
+            ctx.fillStyle = "#5c5b57"; ctx.font = "11.5px Inter, sans-serif";
+            (item.content || "").split("\n").forEach((line, idx) => ctx.fillText(line, x + 18, y + 60 + idx * 18));
+          } else if (item.type === "text") {
+            ctx.fillStyle = item.color || "#141413";
+            ctx.font = `600 ${item.fontSize || 22}px ${item.fontFamily === "serif" ? "Georgia, serif" : item.fontFamily === "mono" ? "monospace" : "Inter, sans-serif"}`;
+            (item.content || "").split("\n").forEach((line, idx) => ctx.fillText(line, x + 8, y + (item.fontSize || 22) + idx * 26));
+          } else if (item.type === "brush" && item.pathD) {
+            ctx.save(); ctx.translate(x, y);
+            ctx.strokeStyle = item.color || "#141413";
+            ctx.lineWidth = item.strokeWidth || 4;
+            ctx.lineCap = "round"; ctx.lineJoin = "round";
+            ctx.stroke(new Path2D(item.pathD));
+            ctx.restore();
+          }
+        });
+        return c;
+      }
+
+      let outCanvas = renderComposite(true);
+      let dataUrl = "";
+      try {
+        dataUrl = outCanvas.toDataURL("image/png");
+      } catch (err) {
+        // Fallback if opened over file:// where browser restricts pixel readback on local files
+        outCanvas = renderComposite(false);
+        dataUrl = outCanvas.toDataURL("image/png");
+        showToast(`已导出「${activeCanvas().title}.png」(file://安全限制已保留向量/文字层，真实站点完整出图)`);
+        const link = document.createElement("a");
+        link.download = `${activeCanvas().title || "flowcanvas"}.png`;
+        link.href = dataUrl;
+        link.click();
+        return;
+      }
+      const link = document.createElement("a");
+      link.download = `${activeCanvas().title || "flowcanvas"}.png`;
+      link.href = dataUrl;
+      link.click();
+      showToast(`已导出整张画布 2x PNG（${w * scale}×${h * scale}）「${activeCanvas().title}.png」`);
+    }
+    function exportSelectedImage() {
+      document.getElementById("exportMenu").classList.remove("open");
+      const img = activeCanvas().items.find(i => selectedIds.includes(i.id) && i.type === "image");
+      if (!img) { showToast("请先选中一张图片后再导出单图"); return; }
+      const link = document.createElement("a");
+      link.download = `${img.title}.jpg`; link.href = img.src; link.click();
+      showToast(`已导出选中图片「${img.title}」`);
+    }
+
+    function triggerRealUpload(fromAssetsPage = false) {
+      uploadTargetIsAssetsPage = fromAssetsPage;
+      document.getElementById("realFileInput").click();
+    }
+    function handleFileUpload(e) {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      files.forEach((file, idx) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const url = String(reader.result || "");
+          const asset = { id: "up_" + Date.now() + "_" + idx, title: file.name.replace(/\.[^.]+$/, ""), dims: "本地上传", src: url };
+          demoAssets.unshift(asset);
+          if (!uploadTargetIsAssetsPage) {
+            pushUndoState();
+            const id = "img_" + Date.now() + "_" + idx;
+            activeCanvas().items.push({ id, type: "image", title: asset.title, x: -90 + idx * 30, y: 60 + idx * 30, w: 205, h: 155, dims: asset.dims, src: url, visible: true });
+            selectedIds = [id];
+          }
+          renderAssetViews();
+          if (!uploadTargetIsAssetsPage) { updateToolButtons(); renderCanvas(); renderLayers(); showToast(`已上传 ${file.name} 到当前画布`); }
+          else { showToast(`已上传 ${file.name} 到素材库`); }
+        };
+        reader.readAsDataURL(file);
+      });
+      e.target.value = "";
+    }
+
+    function renderAssetViews() {
+      const drawerGrid = document.getElementById("drawerAssetGrid");
+      const fullGrid = document.getElementById("fullAssetGrid");
+      drawerGrid.innerHTML = ""; fullGrid.innerHTML = "";
+      demoAssets.forEach((a, idx) => {
+        const dCard = document.createElement("div");
+        dCard.className = "mini-asset-card"; dCard.onclick = () => addAssetToCanvas(idx);
+        dCard.innerHTML = `<img src="${a.src}" alt=""/><div class="meta">+ ${a.title}</div>`;
+        drawerGrid.appendChild(dCard);
+
+        const fCard = document.createElement("div");
+        fCard.className = "asset-tile";
+        fCard.innerHTML = `
+          <img src="${a.src}" alt=""/>
+          <div class="asset-tile-foot">
+            <div><strong>${a.title}</strong><div style="font-size:10.5px;color:var(--text-muted);">${a.dims}</div></div>
+            <button class="btn btn-sm btn-obsidian" onclick="insertAssetAndReturn(${idx})">上画布</button>
+          </div>`;
+        fullGrid.appendChild(fCard);
+      });
+    }
+
+    function addAssetToCanvas(idx, targetId = activeCanvasId) {
+      const c = canvasStore[targetId];
+      const a = demoAssets[idx % demoAssets.length];
+      activeCanvasId = targetId;
+      pushUndoState();
+      const id = "img_" + Date.now();
+      c.items.push({ id, type: "image", title: a.title, x: -90 + (c.items.length % 4) * 28, y: 60, w: 205, h: 155, dims: a.dims, src: a.src, visible: true });
+      selectedIds = [id];
+      updateToolButtons(); renderCanvas(); renderLayers();
+    }
+    function insertAssetAndReturn(idx) {
+      const target = returnCanvasId || activeCanvasId;
+      addAssetToCanvas(idx, target);
+      openCanvasById(target);
+      showToast(`已将素材插入「${canvasStore[target].title}」并返回画布`);
+    }
+
+    function setDockMode(mode) {
+      dockMode = mode;
+      document.getElementById("modeImageBtn").classList.toggle("active", mode === "image");
+      document.getElementById("modeAgentBtn").classList.toggle("active", mode === "agent");
+      document.getElementById("paramSummaryBtn").style.display = mode === "image" ? "inline-flex" : "none";
+      if (mode === "agent") toggleParamsPopover(false);
+    }
+    function toggleParamsPopover(force) {
+      const pop = document.getElementById("paramsPopover");
+      pop.classList.toggle("open", typeof force === "boolean" ? force : !pop.classList.contains("open"));
+    }
+    function pickChip(btn) {
+      btn.parentElement.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
+      btn.classList.add("active");
+    }
+
+    function openHistoryModal() {
+      const c = activeCanvas();
+      const list = document.getElementById("historyList");
+      list.innerHTML = "";
+      c.history.forEach((v, idx) => {
+        const row = document.createElement("div");
+        row.className = "layer-item";
+        row.style.borderColor = "var(--border-hairline)"; row.style.padding = "11px";
+        row.style.background = idx === 0 ? "var(--surface-input)" : "#ffffff";
+        row.innerHTML = `
+          <div>
+            <strong>Revision #${v.rev} · ${v.label}</strong>
+            <div style="font-size:11px;color:var(--text-muted);">${v.time} · 共 ${v.items.length} 个对象</div>
+          </div>
+          ${idx === 0 ? `<span class="sync-chip"><span class="sync-dot"></span>当前版本</span>` : `<button class="btn btn-sm btn-obsidian" onclick="restoreVersion(${v.rev})">恢复此版本</button>`}
+        `;
+        list.appendChild(row);
+      });
+      openModal("historyModal");
+    }
+
+    // Restores snapshot cleanly WITHOUT spamming duplicate entries in c.history!
+    function restoreVersion(targetRev) {
+      const c = activeCanvas();
+      const snap = c.history.find(v => v.rev === targetRev);
+      if (!snap) return;
+      pushUndoState();
+      c.items = JSON.parse(JSON.stringify(snap.items));
+      selectedIds = c.items[0] ? [c.items[0].id] : [];
+      closeModal("historyModal");
+      updateToolButtons(); renderCanvas(); renderLayers(); renderRefs();
+      showToast(`已恢复至快照 Revision #${targetRev}（可 Ctrl+Z 撤销）`);
+    }
+
+    let demoMemoryTurns = ["已分析琥珀香氛视觉基调与暖晨光影"];
+    let demoRejectedNotes = [];
+    let lastDemoProposalBackup = null;
+
+    function clearDemoMemory() {
+      demoMemoryTurns = [];
+      demoRejectedNotes = [];
+      document.getElementById("harnessMemLabel").textContent = "Harness 记忆 · 已清空（0 轮）";
+      showToast("已清空当前画布 Harness 对话与压缩记忆");
+    }
+
+    function submitDockPrompt(customGoal) {
+      const input = document.getElementById("dockPrompt");
+      const goal = customGoal || input.value.trim() || (dockMode === "image" ? "生成暖象牙素陶静物延伸场景" : "结合参考图生成延伸视觉，并把画布元素按三列整理对齐");
+      if (!customGoal) input.value = "";
+      toggleParamsPopover(false);
+
+      if (dockMode === "image") {
+        const pid = "gen_" + Date.now();
+        const model = document.getElementById("imgModelSelect").value;
+        activeCanvas().items.push({ id: pid, type: "pending", title: `生成中 (${model})`, content: "ARQ 队列执行 · SSE 进度推送", x: -110, y: -80, w: 210, h: 170, visible: true });
+        selectedIds = [pid];
+        renderCanvas(); renderLayers();
+        setTimeout(() => {
+          const c = activeCanvas();
+          const idx = c.items.findIndex(i => i.id === pid);
+          if (idx >= 0) {
+            c.items.splice(idx, 1);
+            pushUndoState();
+            c.items.push({ id: pid, type: "image", title: "AI 生成 · " + goal.slice(0, 10), x: -110, y: -80, w: 210, h: 170, dims: "1200 × 900 · MinIO", src: demoAssets[3].src, visible: true });
+            saveCheckpoint("AI 生图落画布");
+            updateToolButtons(); renderCanvas(); renderLayers();
+            showToast("图片生成完成并已写入 MinIO 与画布");
+          }
+        }, 900);
+      } else {
+        toggleRightDrawer(true);
+        demoMemoryTurns.push(goal.slice(0, 28));
+        const compacted = demoMemoryTurns.length > 4 ? `（已自动压缩前 ${demoMemoryTurns.length - 2} 轮为核心风格摘要）` : "";
+        document.getElementById("harnessMemLabel").textContent = `Harness 记忆 · ${demoMemoryTurns.length} 轮 ${compacted}`;
+        document.getElementById("agentGoalDisplay").innerHTML = `<strong>当前指令：</strong>${goal}`;
+        document.getElementById("thinkingCard").classList.remove("collapsed");
+        document.getElementById("thinkingTitle").textContent = `思考过程 (Thinking) · 结合 ${demoMemoryTurns.length} 轮记忆`;
+        document.getElementById("thinkingBody").innerHTML = `1. 读取 Harness 画布记忆：已承接前序 ${Math.max(0, demoMemoryTurns.length - 1)} 轮上下文${demoRejectedNotes.length ? `，并避开曾回退方案「${demoRejectedNotes[demoRejectedNotes.length - 1]}」` : ""}。<br/>2. 分析当前画布 ${activeCanvas().items.length} 个元素与 ${refIds.length} 张参考图（图1..图${Math.max(1, refIds.length)}）。<br/>3. 响应指令「${goal}」生成说明便签与构图调整提案，等待用户预览确认。`;
+        document.getElementById("tool1Desc").textContent = `结合指令「${goal.slice(0, 20)}」调用白名单工具链。`;
+        document.getElementById("tool1Json").textContent = JSON.stringify({ goal, memory_turns: demoMemoryTurns.length, rejected_count: demoRejectedNotes.length, refs: refIds.length }, null, 2);
+        document.getElementById("tool2Desc").textContent = `生成操作提案（add_note / local align），应用前可随时忽略或应用后精准撤销。`;
+        document.getElementById("tool2Status").textContent = "待预览应用";
+        document.getElementById("tool2Status").className = "tool-status status-pending";
+        document.getElementById("proposalStatus").textContent = "尚未写入数据库";
+        document.getElementById("applyProposalBtn").style.display = "inline-flex";
+        document.getElementById("rejectProposalBtn").style.display = "inline-flex";
+        document.getElementById("undoProposalBtn").style.display = "none";
+        document.getElementById("proposalCard").style.display = "flex";
+        document.getElementById("agentBody").scrollTop = 0;
+        showToast("AI Agent 已结合历史记忆完成推理并生成提案");
+      }
+    }
+
+    function applyDemoProposal() {
+      const c = activeCanvas();
+      saveCheckpoint("应用 Agent 提案前");
+      const beforeItemsMap = {};
+      c.items.forEach(it => { beforeItemsMap[it.id] = JSON.parse(JSON.stringify(it)); });
+      pushUndoState();
+      const addedIds = [];
+      const imgs = c.items.filter(i => i.type === "image");
+      imgs.forEach((im, idx) => { im.x = -345 + (idx % 3) * 234; im.y = -210 + Math.floor(idx / 3) * 200; im.w = 210; im.h = 170; });
+      const noteY = imgs.length > 3 ? -10 : -16, noteX = imgs.length > 3 ? -111 : -345;
+      c.items.filter(i => i.type === "note").forEach((n, i) => { n.x = noteX + i * 234; n.y = noteY; n.w = 210; n.h = 170; });
+      const newNoteId = "note_" + Date.now();
+      addedIds.push(newNoteId);
+      c.items.push({ id: newNoteId, type: "note", title: "视觉规范（Agent）", content: "• 已按 3 列网格对齐\n• 统一画廊卡片尺度", x: noteX + 234, y: noteY, w: 210, h: 170, visible: true });
+      lastDemoProposalBackup = { addedIds, beforeItemsMap, goal: document.getElementById("agentGoalDisplay").innerText };
+      saveCheckpoint("应用 Agent 提案后");
+      document.getElementById("proposalStatus").textContent = `已应用 · v${c.revision}`;
+      document.getElementById("tool2Status").textContent = "已应用";
+      document.getElementById("tool2Status").className = "tool-status status-done";
+      document.getElementById("applyProposalBtn").style.display = "none";
+      document.getElementById("rejectProposalBtn").style.display = "none";
+      document.getElementById("undoProposalBtn").style.display = "inline-flex";
+      updateToolButtons(); renderCanvas(true); renderLayers();
+    }
+
+    function revertDemoProposal() {
+      if (!lastDemoProposalBackup) { undoCanvas(); return; }
+      const c = activeCanvas();
+      pushUndoState();
+      const { addedIds, beforeItemsMap, goal } = lastDemoProposalBackup;
+      c.items = c.items
+        .filter(it => !addedIds.includes(it.id))
+        .map(it => beforeItemsMap[it.id] ? beforeItemsMap[it.id] : it);
+      demoRejectedNotes.push(goal.slice(0, 20));
+      lastDemoProposalBackup = null;
+      document.getElementById("proposalStatus").textContent = "已精准撤销此批提案（已记入避坑记忆）";
+      document.getElementById("undoProposalBtn").style.display = "none";
+      document.getElementById("applyProposalBtn").style.display = "inline-flex";
+      document.getElementById("rejectProposalBtn").style.display = "inline-flex";
+      updateToolButtons(); renderCanvas(); renderLayers();
+      showToast("已精准撤销该批 AI 提案并记入 Harness 记忆");
+    }
+
+    function rejectDemoProposal() {
+      const goal = document.getElementById("agentGoalDisplay").innerText;
+      demoRejectedNotes.push(goal.slice(0, 20));
+      document.getElementById("proposalCard").style.display = "none";
+      showToast("已忽略本次提案并写入 Harness 避坑记忆");
+    }
+
+    function renderHomeCards() {
+      const grid = document.getElementById("homeLoggedInGrid");
+      grid.innerHTML = "";
+      Object.values(canvasStore).forEach(c => {
+        const firstImg = c.items.find(i => i.src)?.src;
+        const card = document.createElement("article");
+        card.className = "canvas-card"; card.style.cursor = "pointer";
+        card.onclick = () => openCanvasById(c.id);
+        card.innerHTML = `
+          <div class="canvas-card-cover">${firstImg ? `<img src="${firstImg}" alt=""/>` : `<span style="font-size:12px;color:var(--text-muted);">空白画布</span>`}</div>
+          <div class="canvas-card-body">
+            <div><h3>${c.title}</h3><small>${c.items.length} 个对象 · v${c.revision}</small></div>
+            <span class="btn btn-sm">进入</span>
+          </div>`;
+        grid.appendChild(card);
+      });
+    }
+
+    function cycleHomeRefs() {
+      homeRefCount = (homeRefCount + 1) % 3;
+      const strip = document.getElementById("homeRefStrip");
+      strip.innerHTML = "";
+      for (let i = 0; i < homeRefCount; i++) {
+        const a = demoAssets[i];
+        strip.innerHTML += `<span class="ref-chip"><img src="${a.src}"/><span class="ref-idx">图${i + 1}</span><span>${a.title}</span></span>`;
+      }
+      document.getElementById("homeRefBtnLabel").textContent = `+ 添加参考图 (${homeRefCount}张)`;
+      updateHomeParamsUI();
+    }
+    function updateHomeParamsUI() {
+      const model = document.getElementById("homeModelSelect").value;
+      const hint = document.getElementById("homeModeHint");
+      const ratioSel = document.getElementById("homeRatioSelect");
+      if (homeRefCount === 0) { hint.textContent = "纯文生图参数"; hint.style.color = "var(--sapphire)"; ratioSel.options[0].text = "比例 3:4"; }
+      else if (homeRefCount === 1) { hint.textContent = "单图编辑 · 可对齐图1比例"; hint.style.color = "var(--sapphire)"; ratioSel.options[0].text = "跟随图1比例"; }
+      else { hint.textContent = model === "Kolors" ? "Kolors 不支持2图融合" : "多图融合 · 按图1/图2参考"; hint.style.color = model === "Kolors" ? "var(--amber)" : "var(--sapphire)"; ratioSel.options[0].text = "跟随最后一张图"; }
+    }
+
+    function promptNewBlankCanvas() {
+      if (!isLoggedIn) {
+        pendingHomeIntent = { type: "blank", name: "未命名创意画布" };
+        showToast("请先登录账号，登录后立即为你创建空白画布");
+        switchView("auth");
+        return;
+      }
+      document.getElementById("newBlankNameInput").value = "未命名创意画布";
+      openModal("newBlankModal");
+      setTimeout(() => document.getElementById("newBlankNameInput").select(), 50);
+    }
+    function confirmNewBlankCanvas() {
+      const name = document.getElementById("newBlankNameInput").value.trim() || "未命名创意画布";
+      closeModal("newBlankModal");
+      enterBlankCanvasNow(name);
+    }
+    function enterBlankCanvasNow(title = "未命名创意画布") {
+      const id = "blank_" + Date.now();
+      canvasStore[id] = { id, title, revision: 1, items: [], undoStack: [], redoStack: [], history: [{ rev: 1, label: "空白创建", time: "刚才", items: [] }] };
+      toggleRightDrawer(false); toggleLeftDrawer(false);
+      openCanvasById(id);
+      showToast(`已创建空白画布「${title}」`);
+    }
+    function createFromHome() {
+      const val = document.getElementById("homeGoalInput").value.trim() || "生成暖象牙素陶静物海报";
+      const ratio = document.getElementById("homeRatioSelect").value;
+      const model = document.getElementById("homeModelSelect").value;
+      if (!isLoggedIn) {
+        pendingHomeIntent = { type: "generate", goal: val, ratio, model, refCount: homeRefCount };
+        showToast("已暂存提示词与参考图配比，登录后自动进入画布生成");
+        switchView("auth");
+        return;
+      }
+      enterGeneratedCanvasNow({ goal: val, ratio, model, refCount: homeRefCount });
+    }
+    function enterGeneratedCanvasNow(intent) {
+      const id = "gen_canvas_" + Date.now();
+      const items = [];
+      for (let i = 0; i < intent.refCount; i++) items.push(JSON.parse(JSON.stringify(presetItems[i])));
+      canvasStore[id] = { id, title: intent.goal.slice(0, 12), revision: 1, items, undoStack: [], redoStack: [], history: [{ rev: 1, label: "初始创建", time: "刚才", items: JSON.parse(JSON.stringify(items)) }] };
+      document.getElementById("imgModelSelect").value = intent.model;
+      setDockMode("image"); toggleRightDrawer(false);
+      openCanvasById(id);
+      refIds = items.map(i => i.id); renderRefs();
+      submitDockPrompt(intent.goal);
+    }
+    function completeDemoLogin() {
+      toggleSimulatedAuth(true);
+      if (pendingHomeIntent?.type === "blank") { const n = pendingHomeIntent.name; pendingHomeIntent = null; enterBlankCanvasNow(n); }
+      else if (pendingHomeIntent?.type === "generate") { const intent = pendingHomeIntent; pendingHomeIntent = null; enterGeneratedCanvasNow(intent); }
+      else { switchView("home"); }
+    }
+
+    function openModal(id) { document.getElementById(id).classList.add("open"); }
+    function closeModal(id) { document.getElementById(id).classList.remove("open"); }
+
+    updateToolButtons();
+    renderHomeCards();
+    renderCanvas();
+    renderLayers();
+    renderRefs();
+    renderAssetViews();
+  </script>
+</body>
+</html>

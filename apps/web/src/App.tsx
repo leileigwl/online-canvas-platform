@@ -9,7 +9,20 @@ const CanvasPage = lazy(() => import("./pages/CanvasPage").then((module) => ({ d
 
 function CanvasRoute() {
   const { canvasId } = useParams();
-  return <Suspense fallback={<div className="route-loading">正在打开画布…</div>}><CanvasPage key={canvasId} /></Suspense>;
+  return (
+    <Suspense
+      fallback={
+        <div
+          className="dotted-gallery-bg"
+          style={{ minHeight: "100vh", display: "grid", placeItems: "center", fontSize: 13, color: "var(--text-secondary)" }}
+        >
+          正在进入无限画布…
+        </div>
+      }
+    >
+      <CanvasPage key={canvasId} />
+    </Suspense>
+  );
 }
 
 export default function App() {

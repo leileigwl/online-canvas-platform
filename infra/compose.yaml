@@ -1,0 +1,174 @@
+name: flowcanvas
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: flowcanvas-minio:local
+    build:
+      context: .
+      dockerfile: infra/minio.Dockerfile
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+    expose:
+      - "9000"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  minio-client:
+    image: flowcanvas-minio-client:local
+    build:
+      context: .
+      dockerfile: infra/minio-mc.Dockerfile
+    profiles: ["tools"]
+    environment:
+      MC_HOST_local: http://${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}:${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}@minio:9000
+      S3_BUCKET: flowcanvas-private
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  minio-init:
+    image: flowcanvas-minio-client:local
+    build:
+      context: .
+      dockerfile: infra/minio-mc.Dockerfile
+    entrypoint: ["/usr/local/bin/minio-init"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+      S3_BUCKET: flowcanvas-private
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Set S3_ACCESS_KEY in .env}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?Set S3_SECRET_KEY in .env}
+    volumes:
+      - ./infra/flowcanvas-assets.json:/config/flowcanvas-assets.json:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: flowcanvas-api:local
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment: &backend_environment
+      APP_ENV: ${APP_ENV:-development}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set a random APP_SECRET_KEY in .env}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      QUEUE_ENABLED: "true"
+      AUTO_CREATE_SCHEMA: "false"
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CORS_ORIGINS: "[]"
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-12582912}
+      MAX_ACTIVE_AGENT_RUNS_PER_USER: ${MAX_ACTIVE_AGENT_RUNS_PER_USER:-3}
+      MAX_AGENT_MODEL_CALLS_PER_RUN: ${MAX_AGENT_MODEL_CALLS_PER_RUN:-12}
+      AGENT_MODEL_COMPLETION_TOKENS_PER_CALL: ${AGENT_MODEL_COMPLETION_TOKENS_PER_CALL:-2048}
+      CHAT_COMPLETION_TOKEN_LIMIT_FIELD: ${CHAT_COMPLETION_TOKEN_LIMIT_FIELD:-max_tokens}
+      ASSET_STORAGE: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: flowcanvas-private
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        uv run --package canvas-api alembic -c apps/api/alembic.ini upgrade head
+        && uv run --package canvas-api uvicorn canvas_api.main:app --app-dir apps/api --host 0.0.0.0 --port 8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    image: flowcanvas-api:local
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment: *backend_environment
+    command: ["uv", "run", "--package", "canvas-worker", "arq", "canvas_worker.main.WorkerSettings"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  web:
+    image: flowcanvas-web:local
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+      - "${HTTPS_PORT:-8443}:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

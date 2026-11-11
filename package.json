@@ -4,6 +4,8 @@
   "packageManager": "pnpm@10.32.1",
   "scripts": {
     "dev": "turbo dev --filter=@canvas/web",
+    "dev:api": "uv run --package canvas-api uvicorn canvas_api.main:app --app-dir apps/api --reload --host 127.0.0.1 --port 8001",
+    "dev:worker": "uv run --package canvas-worker arq canvas_worker.main.WorkerSettings",
     "build": "turbo build",
     "typecheck": "turbo typecheck"
   },

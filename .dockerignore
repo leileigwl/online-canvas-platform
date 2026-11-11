@@ -1,0 +1,15 @@
+.git
+.venv
+node_modules
+**/node_modules
+**/dist
+__pycache__
+**/__pycache__
+*.py[cod]
+flowcanvas.db*
+data
+backups
+.env*
+**/.env*
+*.db
+image*.png

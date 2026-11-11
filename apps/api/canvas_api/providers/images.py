@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import re
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -14,6 +15,8 @@ from canvas_api.providers.chat import validate_public_https_url
 
 ALLOWED_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 _EXT_BY_MIME = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+_DATA_IMAGE_RE = re.compile(r"data:image/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+")
+_MD_IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https://[^\s)]+)\)")
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,8 @@ def _ratio_dimensions(aspect_ratio: str, fallback_w: int, fallback_h: int) -> tu
         "1:1": (1024, 1024),
         "3:4": (896, 1152),
         "4:3": (1152, 896),
+        "4:5": (896, 1120),
+        "5:4": (1120, 896),
         "2:3": (832, 1248),
         "3:2": (1248, 832),
         "16:9": (1280, 720),
@@ -124,9 +129,9 @@ def _ratio_dimensions(aspect_ratio: str, fallback_w: int, fallback_h: int) -> tu
 
 
 def _openai_size(aspect_ratio: str, width: int, height: int) -> str:
-    if aspect_ratio in {"3:4", "2:3", "9:16", "9:21"}:
+    if aspect_ratio in {"3:4", "2:3", "4:5", "9:16", "9:21"}:
         return "1024x1536"
-    if aspect_ratio in {"4:3", "3:2", "16:9", "21:9"}:
+    if aspect_ratio in {"4:3", "3:2", "5:4", "16:9", "21:9"}:
         return "1536x1024"
     if aspect_ratio == "1:1":
         return "1024x1024"
@@ -135,8 +140,23 @@ def _openai_size(aspect_ratio: str, width: int, height: int) -> str:
     return "1536x1024" if width > height else "1024x1536"
 
 
+def _decode_data_url(data_url: str) -> GeneratedImage:
+    _, b64_payload = data_url.split(",", 1)
+    return _parse_image_bytes(base64.b64decode(b64_payload))
+
+
+def _is_chat_image_model(model: str, base_url: str) -> bool:
+    lower = model.lower()
+    return (
+        "gemini" in lower
+        or "nano-banana" in lower
+        or "gpt-5-image" in lower
+        or "openrouter.ai" in base_url.lower()
+    )
+
+
 class ConfiguredImageProvider:
-    """BYOK image generation & editing adapter (OpenAI, DashScope, SiliconFlow)."""
+    """BYOK image adapter (Gemini/Nano Banana, OpenAI, DashScope, Ark, SiliconFlow)."""
 
     def __init__(
         self,
@@ -155,6 +175,18 @@ class ConfiguredImageProvider:
         safe_url = await asyncio.to_thread(validate_public_https_url, self.base_url)
         headers = {"Authorization": f"Bearer {self.api_key}"}
         async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+            if self.provider == "google-gemini":
+                resp = await client.get(
+                    f"{safe_url}/models",
+                    headers={"x-goog-api-key": self.api_key},
+                )
+                if resp.status_code in {401, 403} and "googleapis.com" not in safe_url:
+                    resp = await client.get(f"{safe_url}/models", headers=headers)
+                if resp.status_code in {401, 403}:
+                    raise ImageProviderError("Google Gemini API Key 鉴权失败，请检查密钥")
+                if resp.status_code >= 400 and resp.status_code != 405:
+                    raise ImageProviderError(f"无法连接 Gemini 生图服务 (HTTP {resp.status_code})")
+                return
             if self.provider == "dashscope":
                 endpoint = (
                     safe_url
@@ -171,6 +203,17 @@ class ConfiguredImageProvider:
                     raise ImageProviderError("DashScope API Key 鉴权失败，请检查密钥")
                 if resp.status_code >= 500 or resp.status_code == 404:
                     raise ImageProviderError(f"DashScope 接口地址不可达 (HTTP {resp.status_code})")
+                return
+            if self.provider == "volcengine-ark":
+                resp = await client.post(
+                    f"{safe_url}/images/generations",
+                    headers=headers,
+                    json={"model": self.default_model, "prompt": ""},
+                )
+                if resp.status_code in {401, 403}:
+                    raise ImageProviderError("火山方舟 API Key 鉴权失败，请检查密钥")
+                if resp.status_code >= 500 or resp.status_code == 404:
+                    raise ImageProviderError(f"火山方舟接口地址不可达 (HTTP {resp.status_code})")
                 return
             resp = await client.get(f"{safe_url}/models", headers=headers)
             if resp.status_code in {401, 403}:
@@ -190,8 +233,12 @@ class ConfiguredImageProvider:
         safe_url = await asyncio.to_thread(validate_public_https_url, self.base_url)
         model = self.default_model if request.model in {"", "auto"} else request.model
         async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
+            if self.provider == "google-gemini":
+                return await self._call_google_gemini(client, safe_url, model, request)
             if self.provider == "dashscope":
                 return await self._call_dashscope(client, safe_url, model, request)
+            if self.provider == "volcengine-ark":
+                return await self._call_volcengine_ark(client, safe_url, model, request)
             if self.provider == "siliconflow":
                 return await self._call_siliconflow(client, safe_url, model, request)
             return await self._call_openai(client, safe_url, model, request)
@@ -205,10 +252,106 @@ class ConfiguredImageProvider:
                 raw = base64.b64decode(entry["b64_json"])
                 results.append(_parse_image_bytes(raw))
             elif entry.get("url"):
-                results.append(await _fetch_image_url(client, str(entry["url"])))
+                url = str(entry["url"])
+                if url.startswith("data:image/"):
+                    results.append(_decode_data_url(url))
+                else:
+                    results.append(await _fetch_image_url(client, url))
         if not results:
             raise ImageProviderError("生图服务未返回任何可用图片数据")
         return results
+
+    async def _call_google_gemini(
+        self,
+        client: httpx.AsyncClient,
+        safe_url: str,
+        model: str,
+        request: ImageGenerationRequest,
+    ) -> list[GeneratedImage]:
+        refs = request.reference_images
+        if len(refs) > 14:
+            raise ImageProviderError("Google Gemini / Nano Banana 单次最多支持 14 张参考图")
+        clean_model = model.removeprefix("models/")
+
+        if clean_model.startswith("imagen"):
+            aspect = "1:1" if request.aspect_ratio == "auto" else request.aspect_ratio
+            payload = {
+                "instances": [{"prompt": request.prompt}],
+                "parameters": {
+                    "sampleCount": min(max(request.count, 1), 4),
+                    "aspectRatio": aspect,
+                },
+            }
+            resp = await client.post(
+                f"{safe_url}/models/{clean_model}:predict",
+                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code >= 400:
+                raise ImageProviderError(f"Google Imagen 接口错误 (HTTP {resp.status_code})")
+            preds = resp.json().get("predictions") or []
+            entries = [
+                {"b64_json": p["bytesBase64Encoded"]}
+                for p in preds
+                if p.get("bytesBase64Encoded")
+            ]
+            return await self._collect_b64_or_urls(client, entries, request.count)
+
+        parts: list[dict[str, object]] = [{"text": request.prompt}]
+        for ref in refs:
+            parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": ref.mime_type,
+                        "data": base64.b64encode(ref.content).decode("ascii"),
+                    }
+                }
+            )
+        image_cfg: dict[str, object] = {}
+        if request.aspect_ratio != "auto":
+            image_cfg["aspectRatio"] = request.aspect_ratio
+        if request.resolution in {"1K", "2K", "4K"} and any(
+            tok in clean_model.lower() for tok in ("nano-banana-2", "gemini-3", "pro-image", "3.1")
+        ):
+            image_cfg["imageSize"] = request.resolution
+
+        gen_cfg: dict[str, object] = {"responseModalities": ["TEXT", "IMAGE"]}
+        if image_cfg:
+            gen_cfg["imageConfig"] = image_cfg
+
+        endpoint = f"{safe_url}/models/{clean_model}:generateContent"
+        target_count = min(max(request.count, 1), 4)
+        results: list[GeneratedImage] = []
+        for _ in range(target_count):
+            req_body = {"contents": [{"parts": parts}], "generationConfig": gen_cfg}
+            resp = await client.post(
+                endpoint,
+                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+                json=req_body,
+            )
+            if resp.status_code in {401, 403} and "googleapis.com" not in safe_url:
+                resp = await client.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=req_body,
+                )
+            if resp.status_code >= 400:
+                raise ImageProviderError(f"Gemini / Nano Banana 生图错误 (HTTP {resp.status_code})")
+            body = resp.json()
+            for cand in body.get("candidates") or []:
+                cparts = (cand.get("content") or {}).get("parts") or []
+                for part in cparts:
+                    inline = part.get("inlineData") or part.get("inline_data")
+                    if isinstance(inline, dict) and inline.get("data"):
+                        results.append(_parse_image_bytes(base64.b64decode(inline["data"])))
+            if len(results) >= target_count:
+                break
+        if not results:
+            raise ImageProviderError("Gemini / Nano Banana 未返回图片内容")
+        return results[:target_count]
 
     async def _call_openai(
         self,
@@ -217,36 +360,68 @@ class ConfiguredImageProvider:
         model: str,
         request: ImageGenerationRequest,
     ) -> list[GeneratedImage]:
+        if _is_chat_image_model(model, safe_url):
+            return await self._call_openai_chat_image(client, safe_url, model, request)
+
         headers = {"Authorization": f"Bearer {self.api_key}"}
         refs = request.reference_images
         size = _openai_size(request.aspect_ratio, request.width, request.height)
-        is_gpt_image = model.startswith("gpt-image") or model.startswith("chatgpt-image")
+        is_gpt_image = model.startswith(("gpt-image", "chatgpt-image"))
+        # Context7 OpenAI 2026 spec: gpt-image-2 / 2.5 / 2.6 reject explicit input_fidelity.
+        supports_input_fidelity = model.startswith(("gpt-image-1", "gpt-image-1.5"))
 
         if refs:
             if len(refs) > 16:
                 raise ImageProviderError("OpenAI /images/edits 单次最多支持 16 张参考图")
-            files = []
-            field_name = "image" if len(refs) == 1 else "image[]"
-            for idx, ref in enumerate(refs):
-                ext = _EXT_BY_MIME.get(ref.mime_type, "png")
-                files.append((field_name, (f"ref_{idx}.{ext}", ref.content, ref.mime_type)))
-            data: dict[str, str] = {
-                "model": model,
-                "prompt": request.prompt,
-                "n": str(request.count),
-            }
-            if size:
-                data["size"] = size
-            if request.quality != "auto":
-                data["quality"] = request.quality
-            if is_gpt_image and request.input_fidelity in {"high", "low"}:
-                data["input_fidelity"] = request.input_fidelity
-            if is_gpt_image and request.transparent:
-                data["background"] = "transparent"
-                data["output_format"] = "png"
-            resp = await client.post(
-                f"{safe_url}/images/edits", headers=headers, data=data, files=files
-            )
+            resp: httpx.Response | None = None
+            if model.startswith(("gpt-image-2", "chatgpt-image")):
+                json_body: dict[str, object] = {
+                    "model": model,
+                    "prompt": request.prompt,
+                    "images": [
+                        {
+                            "image_url": (
+                                f"data:{ref.mime_type};base64,"
+                                f"{base64.b64encode(ref.content).decode('ascii')}"
+                            )
+                        }
+                        for ref in refs
+                    ],
+                    "n": request.count,
+                }
+                if size:
+                    json_body["size"] = size
+                if request.quality != "auto":
+                    json_body["quality"] = request.quality
+                if request.transparent:
+                    json_body["background"] = "transparent"
+                    json_body["output_format"] = "png"
+                resp = await client.post(
+                    f"{safe_url}/images/edits", headers=headers, json=json_body
+                )
+            if resp is None or resp.status_code in {400, 415, 422}:
+                files = []
+                field_name = "image" if len(refs) == 1 else "image[]"
+                for idx, ref in enumerate(refs):
+                    ext = _EXT_BY_MIME.get(ref.mime_type, "png")
+                    files.append((field_name, (f"ref_{idx}.{ext}", ref.content, ref.mime_type)))
+                data: dict[str, str] = {
+                    "model": model,
+                    "prompt": request.prompt,
+                    "n": str(request.count),
+                }
+                if size:
+                    data["size"] = size
+                if request.quality != "auto":
+                    data["quality"] = request.quality
+                if supports_input_fidelity and request.input_fidelity in {"high", "low"}:
+                    data["input_fidelity"] = request.input_fidelity
+                if is_gpt_image and request.transparent:
+                    data["background"] = "transparent"
+                    data["output_format"] = "png"
+                resp = await client.post(
+                    f"{safe_url}/images/edits", headers=headers, data=data, files=files
+                )
         else:
             payload: dict[str, object] = {
                 "model": model,
@@ -262,9 +437,116 @@ class ConfiguredImageProvider:
             resp = await client.post(
                 f"{safe_url}/images/generations", headers=headers, json=payload
             )
+            if resp.status_code in {404, 405}:
+                return await self._call_openai_chat_image(client, safe_url, model, request)
 
         if resp.status_code >= 400:
             raise ImageProviderError(f"OpenAI 生图接口错误 (HTTP {resp.status_code})")
+        body = resp.json()
+        return await self._collect_b64_or_urls(client, body.get("data") or [], request.count)
+
+    async def _call_openai_chat_image(
+        self,
+        client: httpx.AsyncClient,
+        safe_url: str,
+        model: str,
+        request: ImageGenerationRequest,
+    ) -> list[GeneratedImage]:
+        content_parts: list[dict[str, object]] = [{"type": "text", "text": request.prompt}]
+        for ref in request.reference_images[:14]:
+            b64 = base64.b64encode(ref.content).decode("ascii")
+            content_parts.append(
+                {"type": "image_url", "image_url": {"url": f"data:{ref.mime_type};base64,{b64}"}}
+            )
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [{"role": "user", "content": content_parts}],
+            "modalities": ["image", "text"],
+        }
+        if request.aspect_ratio != "auto":
+            payload["image_config"] = {"aspect_ratio": request.aspect_ratio}
+
+        resp = await client.post(
+            f"{safe_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        if resp.status_code >= 400:
+            raise ImageProviderError(f"聚合网关生图接口错误 (HTTP {resp.status_code})")
+        body = resp.json()
+        entries: list[dict] = []
+        for choice in body.get("choices") or []:
+            msg = choice.get("message") or {}
+            for img in msg.get("images") or []:
+                if isinstance(img, dict):
+                    u = (img.get("image_url") or {}).get("url") or img.get("url")
+                    if u:
+                        entries.append({"url": u})
+                    elif img.get("b64_json"):
+                        entries.append({"b64_json": img["b64_json"]})
+            msg_content = msg.get("content")
+            if isinstance(msg_content, list):
+                for part in msg_content:
+                    if not isinstance(part, dict):
+                        continue
+                    img_url = (part.get("image_url") or {}).get("url")
+                    if img_url:
+                        entries.append({"url": img_url})
+                    elif part.get("b64_json"):
+                        entries.append({"b64_json": part["b64_json"]})
+                    elif (
+                        isinstance(part.get("inline_data"), dict)
+                        and part["inline_data"].get("data")
+                    ):
+                        entries.append({"b64_json": part["inline_data"]["data"]})
+            elif isinstance(msg_content, str):
+                for data_uri in _DATA_IMAGE_RE.findall(msg_content):
+                    entries.append({"url": data_uri})
+                for https_url in _MD_IMAGE_URL_RE.findall(msg_content):
+                    entries.append({"url": https_url})
+        return await self._collect_b64_or_urls(client, entries, request.count)
+
+    async def _call_volcengine_ark(
+        self,
+        client: httpx.AsyncClient,
+        safe_url: str,
+        model: str,
+        request: ImageGenerationRequest,
+    ) -> list[GeneratedImage]:
+        refs = request.reference_images
+        if len(refs) > 10:
+            raise ImageProviderError("火山方舟即梦 Seedream 单次最多支持 10 张参考图")
+        w, h = _ratio_dimensions(request.aspect_ratio, request.width, request.height)
+        size = request.resolution if request.resolution in {"1K", "2K", "4K"} else f"{w}x{h}"
+        payload: dict[str, object] = {
+            "model": model,
+            "prompt": request.prompt,
+            "size": size,
+            "watermark": False,
+            "response_format": "url",
+        }
+        if len(refs) == 1:
+            ref = refs[0]
+            b64 = base64.b64encode(ref.content).decode("ascii")
+            payload["image"] = f"data:{ref.mime_type};base64,{b64}"
+        elif len(refs) > 1:
+            payload["image"] = [
+                f"data:{ref.mime_type};base64,{base64.b64encode(ref.content).decode('ascii')}"
+                for ref in refs
+            ]
+        if request.transparent:
+            payload["background"] = "transparent"
+        if request.count > 1 and "5-0" not in model:
+            payload["sequential_image_generation"] = "auto"
+            payload["sequential_image_generation_options"] = {"max_images": min(request.count, 4)}
+
+        resp = await client.post(
+            f"{safe_url}/images/generations",
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        if resp.status_code >= 400:
+            raise ImageProviderError(f"火山方舟即梦生图错误 (HTTP {resp.status_code})")
         body = resp.json()
         return await self._collect_b64_or_urls(client, body.get("data") or [], request.count)
 

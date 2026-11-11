@@ -84,6 +84,7 @@ from canvas_api.schemas import (
     UserOut,
 )
 from canvas_api.security import (
+    decrypt_secret,
     encrypt_secret,
     hash_password,
     new_session_token,
@@ -1010,29 +1011,203 @@ async def test_model_config(
     return {"ok": True, "message": "模型服务连接成功"}
 
 
+def _image_config_out(config: ImageModelConfig) -> ImageModelConfigOut:
+    return ImageModelConfigOut(
+        id=config.id,
+        label=config.label,
+        provider=config.provider,
+        base_url=config.base_url,
+        model_name=config.model_name,
+        default_options=config.default_options or {},
+        is_default=config.is_default,
+        configured=True,
+    )
+
+
+async def _save_image_config_row(
+    *,
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    payload: ImageModelConfigInput,
+    settings: Settings,
+    target_id: uuid.UUID | None = None,
+    upsert_default_when_untargeted: bool = False,
+) -> ImageModelConfig:
+    try:
+        base_url = await asyncio.to_thread(validate_public_https_url, payload.base_url)
+    except ValueError as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
+
+    existing: ImageModelConfig | None = None
+    lookup_id = target_id or payload.id
+    if lookup_id is not None:
+        existing = await session.scalar(
+            select(ImageModelConfig).where(
+                ImageModelConfig.owner_id == user_id, ImageModelConfig.id == lookup_id
+            )
+        )
+        if existing is None:
+            raise not_found("未找到指定的生图配置")
+    elif upsert_default_when_untargeted:
+        existing = await session.scalar(
+            select(ImageModelConfig)
+            .where(ImageModelConfig.owner_id == user_id)
+            .order_by(ImageModelConfig.is_default.desc(), ImageModelConfig.updated_at.desc())
+        )
+
+    if existing is None and not payload.api_key:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "首次保存生图配置时需要提供 API 密钥"
+        )
+
+    sibling_count = await session.scalar(
+        select(func.count(ImageModelConfig.id)).where(ImageModelConfig.owner_id == user_id)
+    )
+    make_default = payload.is_default or (sibling_count == 0 and existing is None)
+    if make_default:
+        await session.execute(
+            update(ImageModelConfig)
+            .where(ImageModelConfig.owner_id == user_id)
+            .values(is_default=False)
+        )
+
+    clean_label = payload.label.strip() or f"{payload.provider} · {payload.model_name}"[:80]
+    if existing is None:
+        existing = ImageModelConfig(
+            owner_id=user_id,
+            label=clean_label,
+            provider=payload.provider,
+            base_url=base_url,
+            model_name=payload.model_name,
+            encrypted_api_key=encrypt_secret(payload.api_key or "", settings),
+            default_options=payload.default_options,
+            is_default=make_default,
+        )
+        session.add(existing)
+    else:
+        existing.label = clean_label
+        existing.provider = payload.provider
+        existing.base_url = base_url
+        existing.model_name = payload.model_name
+        existing.default_options = payload.default_options
+        existing.is_default = make_default
+        if payload.api_key:
+            existing.encrypted_api_key = encrypt_secret(payload.api_key, settings)
+
+    await session.flush()
+    await _audit_event(
+        session, user_id, "image_config.saved", "image_model_config", str(existing.id)
+    )
+    await session.commit()
+    await session.refresh(existing)
+    return existing
+
+
+@router.get("/agent/image-configs", response_model=list[ImageModelConfigOut])
+async def list_image_configs(
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ImageModelConfigOut]:
+    rows = await session.scalars(
+        select(ImageModelConfig)
+        .where(ImageModelConfig.owner_id == user.id)
+        .order_by(ImageModelConfig.is_default.desc(), ImageModelConfig.updated_at.desc())
+    )
+    return [_image_config_out(row) for row in rows]
+
+
+@router.post(
+    "/agent/image-configs",
+    response_model=ImageModelConfigOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_image_config(
+    payload: ImageModelConfigInput,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> ImageModelConfigOut:
+    saved = await _save_image_config_row(
+        session=session,
+        user_id=user.id,
+        payload=payload,
+        settings=request.app.state.settings,
+        upsert_default_when_untargeted=False,
+    )
+    return _image_config_out(saved)
+
+
+@router.put("/agent/image-configs/{config_id}", response_model=ImageModelConfigOut)
+async def update_image_config(
+    config_id: uuid.UUID,
+    payload: ImageModelConfigInput,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> ImageModelConfigOut:
+    saved = await _save_image_config_row(
+        session=session,
+        user_id=user.id,
+        payload=payload,
+        settings=request.app.state.settings,
+        target_id=config_id,
+    )
+    return _image_config_out(saved)
+
+
+@router.delete("/agent/image-configs/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_image_config(
+    config_id: uuid.UUID,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    row = await session.scalar(
+        select(ImageModelConfig).where(
+            ImageModelConfig.owner_id == user.id, ImageModelConfig.id == config_id
+        )
+    )
+    if row is None:
+        raise not_found("未找到指定的生图配置")
+    was_default = row.is_default
+    await session.delete(row)
+    await session.flush()
+    if was_default:
+        replacement = await session.scalar(
+            select(ImageModelConfig)
+            .where(ImageModelConfig.owner_id == user.id)
+            .order_by(ImageModelConfig.updated_at.desc())
+        )
+        if replacement is not None:
+            replacement.is_default = True
+    await _audit_event(
+        session, user.id, "image_config.deleted", "image_model_config", str(config_id)
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/agent/image-config", response_model=ImageModelConfigOut)
 async def get_image_config(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ImageModelConfigOut:
     config = await session.scalar(
-        select(ImageModelConfig).where(ImageModelConfig.owner_id == user.id)
+        select(ImageModelConfig)
+        .where(ImageModelConfig.owner_id == user.id)
+        .order_by(ImageModelConfig.is_default.desc(), ImageModelConfig.updated_at.desc())
     )
     if config is None:
         return ImageModelConfigOut(
+            id=None,
+            label="",
             provider="openai-compatible",
             base_url="",
             model_name="",
             default_options={},
+            is_default=True,
             configured=False,
         )
-    return ImageModelConfigOut(
-        provider=config.provider,
-        base_url=config.base_url,
-        model_name=config.model_name,
-        default_options=config.default_options or {},
-        configured=True,
-    )
+    return _image_config_out(config)
 
 
 @router.put("/agent/image-config", response_model=ImageModelConfigOut)
@@ -1042,60 +1217,41 @@ async def save_image_config(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ImageModelConfigOut:
-    try:
-        base_url = await asyncio.to_thread(validate_public_https_url, payload.base_url)
-    except ValueError as error:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
-    config = await session.scalar(
-        select(ImageModelConfig).where(ImageModelConfig.owner_id == user.id)
+    saved = await _save_image_config_row(
+        session=session,
+        user_id=user.id,
+        payload=payload,
+        settings=request.app.state.settings,
+        upsert_default_when_untargeted=True,
     )
-    if config is None and not payload.api_key:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "首次保存生图配置时需要提供 API 密钥"
-        )
-    if config is None:
-        config = ImageModelConfig(
-            owner_id=user.id,
-            provider=payload.provider,
-            base_url=base_url,
-            model_name=payload.model_name,
-            encrypted_api_key=encrypt_secret(payload.api_key or "", request.app.state.settings),
-            default_options=payload.default_options,
-        )
-        session.add(config)
-    else:
-        config.provider = payload.provider
-        config.base_url = base_url
-        config.model_name = payload.model_name
-        config.default_options = payload.default_options
-        if payload.api_key:
-            config.encrypted_api_key = encrypt_secret(payload.api_key, request.app.state.settings)
-    await session.flush()
-    await _audit_event(session, user.id, "image_config.saved", "image_model_config", str(config.id))
-    await session.commit()
-    return ImageModelConfigOut(
-        provider=config.provider,
-        base_url=config.base_url,
-        model_name=config.model_name,
-        default_options=config.default_options or {},
-        configured=True,
-    )
+    return _image_config_out(saved)
 
 
 @router.post("/agent/image-config/test")
 async def test_image_config(
     payload: ImageModelConfigInput,
-    _user: User = Depends(current_user),
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """验证生图接口地址与 API Key 鉴权状态，绝不保存或回显密钥。"""
-    if not payload.api_key:
+    api_key = payload.api_key
+    if not api_key and payload.id is not None:
+        saved = await session.scalar(
+            select(ImageModelConfig).where(
+                ImageModelConfig.owner_id == user.id, ImageModelConfig.id == payload.id
+            )
+        )
+        if saved is not None:
+            api_key = decrypt_secret(saved.encrypted_api_key, request.app.state.settings)
+    if not api_key:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "测试连接需要提供 API 密钥")
     try:
         base_url = await asyncio.to_thread(validate_public_https_url, payload.base_url)
         await ConfiguredImageProvider(
             provider=payload.provider,
             base_url=base_url,
-            api_key=payload.api_key,
+            api_key=api_key,
             default_model=payload.model_name,
         ).test_connection()
     except ValueError as error:
@@ -1128,7 +1284,12 @@ async def request_image_generation(
         if len(reference_assets) != len(set(payload.reference_asset_ids)):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "参考图片必须属于当前账户")
     provider = await resolve_user_image_provider(
-        session, user.id, request.app.state.settings, fallback=request.app.state.image_provider
+        session,
+        user.id,
+        request.app.state.settings,
+        fallback=request.app.state.image_provider,
+        requested_model=payload.model,
+        config_id=payload.config_id,
     )
     storage: ObjectStorage = request.app.state.object_storage
     reference_images = []

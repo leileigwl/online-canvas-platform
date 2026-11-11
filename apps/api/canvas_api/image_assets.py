@@ -95,21 +95,61 @@ async def persist_generated_images(
     return saved
 
 
+def _infer_provider_for_model(model: str) -> str | None:
+    lower = model.lower().strip()
+    if not lower or lower == "auto":
+        return None
+    if lower.startswith(("gemini", "nano-banana", "imagen")):
+        return "google-gemini"
+    if lower.startswith(("qwen-image", "wan")):
+        return "dashscope"
+    if lower.startswith(("doubao-seedream", "seedream")):
+        return "volcengine-ark"
+    if lower.startswith(("kwai-kolors", "kolors", "black-forest-labs/", "qwen/qwen-image")):
+        return "siliconflow"
+    if lower.startswith(("gpt-image", "chatgpt-image", "dall-e")):
+        return "openai-compatible"
+    return None
+
+
 async def resolve_user_image_provider(
     session: AsyncSession,
     owner_id: uuid.UUID,
     settings: Settings,
     fallback: ImageGenerationProvider | None = None,
+    *,
+    requested_model: str | None = None,
+    config_id: uuid.UUID | None = None,
 ) -> ImageGenerationProvider:
-    """Resolve user's encrypted BYOK image provider from Postgres, falling back cleanly."""
-    config = await session.scalar(
-        select(ImageModelConfig).where(ImageModelConfig.owner_id == owner_id)
+    """Resolve user's encrypted BYOK image provider by id, model match, or default profile."""
+    configs = list(
+        await session.scalars(
+            select(ImageModelConfig)
+            .where(ImageModelConfig.owner_id == owner_id)
+            .order_by(ImageModelConfig.is_default.desc(), ImageModelConfig.updated_at.desc())
+        )
     )
-    if config is not None:
+    selected: ImageModelConfig | None = None
+    if config_id is not None:
+        selected = next((c for c in configs if c.id == config_id), None)
+        if selected is None:
+            return fallback or UnconfiguredImageProvider()
+    elif configs:
+        clean_req = (requested_model or "").strip().lower()
+        if clean_req and clean_req != "auto":
+            selected = next((c for c in configs if c.model_name.lower() == clean_req), None)
+            if selected is None:
+                inferred = _infer_provider_for_model(clean_req)
+                if inferred is not None:
+                    selected = next((c for c in configs if c.provider == inferred), None)
+        if selected is None:
+            selected = next((c for c in configs if c.is_default), configs[0])
+
+    if selected is not None:
         return ConfiguredImageProvider(
-            provider=config.provider,
-            base_url=config.base_url,
-            api_key=decrypt_secret(config.encrypted_api_key, settings),
-            default_model=config.model_name,
+            provider=selected.provider,
+            base_url=selected.base_url,
+            api_key=decrypt_secret(selected.encrypted_api_key, settings),
+            default_model=selected.model_name,
         )
     return fallback or UnconfiguredImageProvider()

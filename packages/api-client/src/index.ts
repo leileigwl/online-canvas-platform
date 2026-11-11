@@ -25,25 +25,37 @@ export type Asset = {
   created_at: string;
 };
 
-export type ImageProviderType = "openai-compatible" | "dashscope" | "siliconflow";
+export type ImageProviderType =
+  | "openai-compatible"
+  | "google-gemini"
+  | "dashscope"
+  | "volcengine-ark"
+  | "siliconflow";
 
 export type ImageModelConfig = {
+  id?: string | null;
+  label: string;
   provider: ImageProviderType;
   base_url: string;
   model_name: string;
   default_options: Record<string, unknown>;
+  is_default: boolean;
   configured: boolean;
 };
 
 export type ImageModelConfigInput = {
+  id?: string | null;
+  label?: string;
   provider: ImageProviderType;
   base_url: string;
   model_name: string;
   api_key?: string;
   default_options?: Record<string, unknown>;
+  is_default?: boolean;
 };
 
 export type ImageGenerationInput = {
+  config_id?: string | null;
   prompt: string;
   reference_asset_ids: string[];
   model: string;
@@ -203,6 +215,20 @@ export const api = {
       method: "PUT",
       body: json({ base_revision, document, viewport }),
     }),
+  saveCanvasKeepalive: (
+    id: string,
+    base_revision: number,
+    document: CanvasDocument,
+    viewport: CanvasViewport,
+  ) => {
+    void fetch(`${apiBase}/canvases/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: json({ base_revision, document, viewport }),
+      credentials: "include",
+      keepalive: true,
+    }).catch(() => {});
+  },
   listCanvasVersions: (id: string, limit = 12) =>
     request<CanvasVersion[]>(`/canvases/${id}/versions?limit=${limit}`),
   createCanvasCheckpoint: (id: string) =>
@@ -262,6 +288,16 @@ export const api = {
     }),
 
   getImageConfig: () => request<ImageModelConfig>("/agent/image-config"),
+  listImageConfigs: () => request<ImageModelConfig[]>("/agent/image-configs"),
+  createImageConfig: (input: ImageModelConfigInput) =>
+    request<ImageModelConfig>("/agent/image-configs", { method: "POST", body: json(input) }),
+  updateImageConfig: (id: string, input: ImageModelConfigInput) =>
+    request<ImageModelConfig>(`/agent/image-configs/${id}`, {
+      method: "PUT",
+      body: json(input),
+    }),
+  deleteImageConfig: (id: string) =>
+    request<void>(`/agent/image-configs/${id}`, { method: "DELETE" }),
   saveImageConfig: (input: ImageModelConfigInput) =>
     request<ImageModelConfig>("/agent/image-config", { method: "PUT", body: json(input) }),
   testImageConfig: (input: ImageModelConfigInput) =>

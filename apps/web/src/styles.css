@@ -159,10 +159,10 @@ a { color: inherit; text-decoration: none; }
 .rail-sep { width: 20px; height: 1px; background: var(--border-hairline); margin: 2px 0; }
 .tool-subbar {
   position: absolute; top: 216px; z-index: 33;
-  padding: 9px 11px; border-radius: 14px; background: var(--surface-glass); backdrop-filter: blur(20px);
+  padding: 11px 13px; border-radius: 14px; background: var(--surface-glass); backdrop-filter: blur(20px);
   border: 1px solid var(--border-hairline); box-shadow: var(--shadow-float);
-  display: flex; flex-direction: column; gap: 8px; width: 162px; font-size: 11.5px;
-  transition: left .22s ease;
+  display: flex; flex-direction: column; gap: 9px; width: max-content; min-width: 184px; max-width: 248px;
+  font-size: 11.5px; transition: left .22s ease;
 }
 
 /* Drawers & Minimap */
@@ -220,7 +220,7 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid var(--border-hairline); box-shadow: var(--shadow-float);
   display: flex; flex-direction: column; gap: 11px; z-index: 40;
 }
-.chip-btn { padding: 4px 10px; border-radius: var(--radius-pill); font-size: 11.5px; border: 1px solid var(--border-hairline); background: var(--surface-solid); color: var(--text-secondary); }
+.chip-btn { padding: 4px 10px; border-radius: var(--radius-pill); font-size: 11.5px; border: 1px solid var(--border-hairline); background: var(--surface-solid); color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
 .chip-btn.active { background: var(--obsidian); color: #ffffff; border-color: var(--obsidian); }
 
 /* Right Agent Cards (flex-shrink: 0 guarantees full expandability and smooth scrolling) */

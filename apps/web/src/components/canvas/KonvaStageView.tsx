@@ -120,6 +120,12 @@ type KonvaStageViewProps = {
   stageSize: { width: number; height: number };
 };
 
+function resolveCanvasFontFamily(font: "sans" | "serif" | "mono" | undefined): string {
+  if (font === "serif") return "Georgia, 'Noto Serif SC', serif";
+  if (font === "mono") return "Menlo, ui-monospace, monospace";
+  return "Inter, 'PingFang SC', 'Noto Sans SC', sans-serif";
+}
+
 export function KonvaStageView({
   items,
   viewport,
@@ -152,12 +158,15 @@ export function KonvaStageView({
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const initialEditingTextRef = useRef<string>("");
+  const skipBlurCommitRef = useRef<boolean>(false);
 
   const visibleItems = useMemo(() => items.filter((i) => i.visible !== false), [items]);
   const isHand = tool === "hand" || spacePressed;
   const canDragItems = tool === "select" && !spacePressed;
 
-  // Bind Transformer cleanly to currently selected nodes in contentLayer
+  // Bind Transformer cleanly to currently selected nodes in contentLayer (hide during inline text edit)
   useEffect(() => {
     const tr = trRef.current;
     const layer = contentLayerRef.current;
@@ -168,11 +177,19 @@ export function KonvaStageView({
       return;
     }
     const nodes = selectedIds
+      .filter((id) => id !== editingId)
       .map((id) => layer.findOne(`#${id}`))
       .filter((n): n is Konva.Node => Boolean(n));
     tr.nodes(nodes);
     tr.getLayer()?.batchDraw();
-  }, [selectedIds, visibleItems, canDragItems, contentLayerRef]);
+  }, [selectedIds, visibleItems, canDragItems, editingId, contentLayerRef]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || !editingId) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.max(el.scrollHeight, 24)}px`;
+  }, [editingId, editingText, viewport.scale]);
 
   const toWorld = (pointer: { x: number; y: number }) => ({
     x: (pointer.x - viewport.x) / viewport.scale,
@@ -208,6 +225,8 @@ export function KonvaStageView({
     if (!stage || !pointer) return;
     const worldPt = toWorld(pointer);
     const createdId = onCreateTextAt(Math.round(worldPt.x), Math.round(worldPt.y));
+    skipBlurCommitRef.current = false;
+    initialEditingTextRef.current = "双击编辑文字内容";
     setEditingId(createdId);
     setEditingText("双击编辑文字内容");
   };
@@ -459,12 +478,7 @@ export function KonvaStageView({
             }
 
             if (item.type === "text") {
-              const ff =
-                (item.font_family ?? textFont) === "serif"
-                  ? "Georgia, Noto Serif SC, serif"
-                  : (item.font_family ?? textFont) === "mono"
-                    ? "Menlo, monospace"
-                    : "Inter, PingFang SC, sans-serif";
+              const ff = resolveCanvasFontFamily(item.font_family ?? textFont);
               return (
                 <Text
                   key={item.id}
@@ -472,6 +486,7 @@ export function KonvaStageView({
                   x={item.x}
                   y={item.y}
                   width={item.width}
+                  visible={editingId !== item.id}
                   text={item.content || "文字图层"}
                   fontFamily={ff}
                   fontSize={item.font_size || textSize}
@@ -485,8 +500,23 @@ export function KonvaStageView({
                     selectSingleOrToggle(item, e.evt.shiftKey);
                   }}
                   onDblClick={() => {
+                    skipBlurCommitRef.current = false;
+                    initialEditingTextRef.current = item.content || "";
                     setEditingId(item.id);
                     setEditingText(item.content || "");
+                  }}
+                  onTransformEnd={(e) => {
+                    const node = e.target;
+                    const sx = node.scaleX();
+                    node.scaleX(1);
+                    node.scaleY(1);
+                    onResizeItem(
+                      item.id,
+                      node.x(),
+                      node.y(),
+                      Math.max(60, Math.round(node.width() * sx)),
+                      Math.max(24, Math.round(node.height())),
+                    );
                   }}
                   onDragStart={moveToDragLayer}
                   onDragMove={syncTransformer}
@@ -624,33 +654,58 @@ export function KonvaStageView({
 
       {editingItem && (
         <textarea
+          ref={textareaRef}
           autoFocus
+          rows={1}
           data-inline-editor="true"
           value={editingText}
           onFocus={(e) => e.currentTarget.select()}
           onChange={(e) => setEditingText(e.target.value)}
           onBlur={() => {
+            if (skipBlurCommitRef.current) {
+              skipBlurCommitRef.current = false;
+              setEditingId(null);
+              return;
+            }
             onUpdateTextContent(editingItem.id, editingText);
             setEditingId(null);
           }}
           onKeyDown={(e) => {
-            if (e.key === "Escape") setEditingId(null);
+            if (e.key === "Escape") {
+              e.preventDefault();
+              skipBlurCommitRef.current = true;
+              setEditingText(initialEditingTextRef.current);
+              setEditingId(null);
+              return;
+            }
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              skipBlurCommitRef.current = true;
+              onUpdateTextContent(editingItem.id, editingText);
+              setEditingId(null);
+            }
           }}
           style={{
             position: "fixed",
             left: editingItem.x * viewport.scale + viewport.x,
             top: editingItem.y * viewport.scale + viewport.y,
-            width: Math.max(180, editingItem.width * viewport.scale),
-            height: Math.max(54, editingItem.height * viewport.scale),
+            width: Math.max(120, editingItem.width * viewport.scale),
+            minHeight: Math.ceil((editingItem.font_size || textSize) * 1.4 * viewport.scale),
             zIndex: 80,
-            background: "#ffffff",
-            border: "2px solid var(--sapphire)",
-            borderRadius: 8,
-            padding: 8,
-            fontSize: Math.max(13, (editingItem.font_size || 16) * viewport.scale),
-            boxShadow: "var(--shadow-float)",
+            background: "rgba(255, 255, 255, 0.72)",
+            backdropFilter: "blur(6px)",
+            border: "1.5px solid var(--sapphire)",
+            borderRadius: 4,
+            padding: 0,
+            margin: 0,
+            fontFamily: resolveCanvasFontFamily(editingItem.font_family ?? textFont),
+            fontWeight: 700,
+            fontSize: Math.max(10, (editingItem.font_size || textSize) * viewport.scale),
+            lineHeight: 1.4,
+            color: editingItem.color || "#141413",
             outline: 0,
-            resize: "both",
+            resize: "none",
+            overflow: "hidden",
           }}
         />
       )}

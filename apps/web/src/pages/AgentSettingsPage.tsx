@@ -1,28 +1,14 @@
-import { api, ApiError, type ImageProviderType, type User } from "@canvas/api-client";
+import {
+  api,
+  ApiError,
+  type ImageModelConfig,
+  type ImageProviderType,
+  type User,
+} from "@canvas/api-client";
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { StudioHeader } from "../components/StudioHeader";
-
-const IMAGE_PROVIDER_PRESETS: Record<
-  ImageProviderType,
-  { baseUrl: string; modelName: string; hint: string }
-> = {
-  dashscope: {
-    baseUrl: "https://dashscope.aliyuncs.com/api/v1",
-    modelName: "qwen-image-2.0",
-    hint: "阿里百炼原生多模态生成/融合，支持 1-3 张参考图（图1/图2/图3），auto 保留末图比例。",
-  },
-  "openai-compatible": {
-    baseUrl: "https://api.openai.com/v1",
-    modelName: "gpt-image-1",
-    hint: "OpenAI 官方及兼容网关，支持 /images/generations 与多达 16 张 /images/edits 透明背景编辑。",
-  },
-  siliconflow: {
-    baseUrl: "https://api.siliconflow.cn/v1",
-    modelName: "Kwai-Kolors/Kolors",
-    hint: "硅基流动兼容端点，支持 0-1 张参考图生图。",
-  },
-};
+import { IMAGE_PROVIDER_ORDER, IMAGE_PROVIDER_PRESETS } from "../lib/image-presets";
 
 export function AgentSettingsPage() {
   const navigate = useNavigate();
@@ -40,13 +26,41 @@ export function AgentSettingsPage() {
   const [chatConfigured, setChatConfigured] = useState(false);
   const [chatStatus, setChatStatus] = useState<string | null>(null);
 
-  // Image Config
-  const [imgProvider, setImgProvider] = useState<ImageProviderType>("dashscope");
-  const [imgBaseUrl, setImgBaseUrl] = useState(IMAGE_PROVIDER_PRESETS.dashscope.baseUrl);
-  const [imgModel, setImgModel] = useState(IMAGE_PROVIDER_PRESETS.dashscope.modelName);
+  // Image Configs (multi-provider profiles)
+  const [imgConfigs, setImgConfigs] = useState<ImageModelConfig[]>([]);
+  const [editingImgId, setEditingImgId] = useState<string | null>(null);
+  const [imgLabel, setImgLabel] = useState("Nano Banana 默认");
+  const [imgProvider, setImgProvider] = useState<ImageProviderType>("google-gemini");
+  const [imgBaseUrl, setImgBaseUrl] = useState(
+    IMAGE_PROVIDER_PRESETS["google-gemini"].baseUrl,
+  );
+  const [imgModel, setImgModel] = useState(
+    IMAGE_PROVIDER_PRESETS["google-gemini"].defaultModel,
+  );
+  const [imgIsDefault, setImgIsDefault] = useState(true);
   const [imgKey, setImgKey] = useState("");
-  const [imgConfigured, setImgConfigured] = useState(false);
   const [imgStatus, setImgStatus] = useState<string | null>(null);
+
+  const applyConfigToForm = (cfg: ImageModelConfig) => {
+    setEditingImgId(cfg.id ?? null);
+    setImgLabel(cfg.label || `${cfg.provider} · ${cfg.model_name}`);
+    setImgProvider(cfg.provider);
+    setImgBaseUrl(cfg.base_url);
+    setImgModel(cfg.model_name);
+    setImgIsDefault(cfg.is_default);
+    setImgKey("");
+  };
+
+  const resetNewImgForm = (provider: ImageProviderType = "google-gemini") => {
+    const preset = IMAGE_PROVIDER_PRESETS[provider];
+    setEditingImgId(null);
+    setImgProvider(provider);
+    setImgBaseUrl(preset.baseUrl);
+    setImgModel(preset.defaultModel);
+    setImgLabel(preset.models[0]?.label || preset.defaultModel);
+    setImgIsDefault(imgConfigs.length === 0);
+    setImgKey("");
+  };
 
   useEffect(() => {
     let active = true;
@@ -59,7 +73,7 @@ export function AgentSettingsPage() {
           return;
         }
         setUser(sess.user);
-        const [llm, img] = await Promise.all([api.getModelConfig(), api.getImageConfig()]);
+        const [llm, imgs] = await Promise.all([api.getModelConfig(), api.listImageConfigs()]);
         if (!active) return;
         setChatConfigured(llm.configured);
         if (llm.configured) {
@@ -67,11 +81,10 @@ export function AgentSettingsPage() {
           setChatModel(llm.model_name);
           setChatContextTokens(llm.max_context_tokens || 32768);
         }
-        setImgConfigured(img.configured);
-        if (img.configured) {
-          setImgProvider(img.provider);
-          setImgBaseUrl(img.base_url);
-          setImgModel(img.model_name);
+        setImgConfigs(imgs);
+        if (imgs.length > 0) {
+          const def = imgs.find((c) => c.is_default) || imgs[0];
+          applyConfigToForm(def);
         }
       } catch {
         if (active) setUser(null);
@@ -280,7 +293,7 @@ export function AgentSettingsPage() {
               </div>
             </section>
 
-            {/* Image Generation Provider Config */}
+            {/* Multi-Provider Image Generation Config */}
             <section
               style={{
                 background: "var(--surface-solid)",
@@ -293,40 +306,172 @@ export function AgentSettingsPage() {
                 gap: 12,
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <strong style={{ fontSize: 15 }}>AI 生图与改图接口（BYOK）</strong>
-                <span
-                  style={{
-                    fontSize: 11,
-                    padding: "2px 8px",
-                    borderRadius: 99,
-                    background: imgConfigured ? "var(--emerald-soft)" : "var(--surface-muted)",
-                    color: imgConfigured ? "#047857" : "var(--text-muted)",
-                  }}
-                >
-                  {imgConfigured ? "已配置" : "未配置"}
-                </span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <strong style={{ fontSize: 15 }}>AI 生图与改图接口（BYOK 多配置）</strong>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      borderRadius: 99,
+                      background: imgConfigs.length > 0 ? "var(--emerald-soft)" : "var(--surface-muted)",
+                      color: imgConfigs.length > 0 ? "#047857" : "var(--text-muted)",
+                    }}
+                  >
+                    {imgConfigs.length > 0 ? `已配 ${imgConfigs.length} 组` : "未配置"}
+                  </span>
+                  {editingImgId && (
+                    <button
+                      type="button"
+                      className="fc-btn fc-btn-sm"
+                      onClick={() => resetNewImgForm(imgProvider)}
+                    >
+                      + 新增配置
+                    </button>
+                  )}
+                </div>
               </div>
+
+              {imgConfigs.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {imgConfigs.map((cfg) => {
+                    const active = editingImgId === cfg.id;
+                    return (
+                      <div
+                        key={cfg.id || `${cfg.provider}-${cfg.model_name}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          border: active
+                            ? "1.5px solid var(--sapphire)"
+                            : "1px solid var(--border-hairline)",
+                          background: active ? "var(--sapphire-soft)" : "var(--surface-input)",
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => applyConfigToForm(cfg)}
+                          style={{
+                            flex: 1,
+                            textAlign: "left",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 2,
+                            minWidth: 0,
+                          }}
+                        >
+                          <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-primary)" }}>
+                            {cfg.label || cfg.model_name}
+                            {cfg.is_default ? " · 默认" : ""}
+                          </span>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {cfg.provider} · {cfg.model_name}
+                          </span>
+                        </button>
+                        {!cfg.is_default && cfg.id && (
+                          <button
+                            type="button"
+                            className="fc-btn fc-btn-sm"
+                            onClick={async () => {
+                              try {
+                                await api.updateImageConfig(cfg.id!, {
+                                  label: cfg.label,
+                                  provider: cfg.provider,
+                                  base_url: cfg.base_url,
+                                  model_name: cfg.model_name,
+                                  is_default: true,
+                                });
+                                const list = await api.listImageConfigs();
+                                setImgConfigs(list);
+                                setImgStatus(`已将「${cfg.label || cfg.model_name}」设为默认生图模型`);
+                              } catch (err) {
+                                setImgStatus(err instanceof ApiError ? err.message : "设置默认失败");
+                              }
+                            }}
+                          >
+                            设为默认
+                          </button>
+                        )}
+                        {cfg.id && (
+                          <button
+                            type="button"
+                            className="fc-btn fc-btn-sm fc-btn-danger"
+                            onClick={async () => {
+                              try {
+                                await api.deleteImageConfig(cfg.id!);
+                                const list = await api.listImageConfigs();
+                                setImgConfigs(list);
+                                if (list.length > 0) applyConfigToForm(list[0]);
+                                else resetNewImgForm("google-gemini");
+                                setImgStatus("已移除该生图配置");
+                              } catch (err) {
+                                setImgStatus(err instanceof ApiError ? err.message : "删除失败");
+                              }
+                            }}
+                          >
+                            删除
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, lineHeight: 1.55 }}>
                 {IMAGE_PROVIDER_PRESETS[imgProvider].hint}
               </p>
 
               <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12 }}>
-                <span style={{ color: "var(--text-secondary)" }}>生图服务商适配器</span>
+                <span style={{ color: "var(--text-secondary)" }}>生图协议适配器</span>
                 <select
                   style={inputStyle}
                   value={imgProvider}
                   onChange={(e) => {
                     const next = e.target.value as ImageProviderType;
+                    const preset = IMAGE_PROVIDER_PRESETS[next];
                     setImgProvider(next);
-                    setImgBaseUrl(IMAGE_PROVIDER_PRESETS[next].baseUrl);
-                    setImgModel(IMAGE_PROVIDER_PRESETS[next].modelName);
+                    setImgBaseUrl(preset.baseUrl);
+                    setImgModel(preset.defaultModel);
+                    if (!editingImgId) setImgLabel(preset.models[0]?.label || preset.defaultModel);
                   }}
                 >
-                  <option value="dashscope">阿里百炼 DashScope (qwen-image-2.0 · 1-3 图融合)</option>
-                  <option value="openai-compatible">OpenAI Image (/generations & /edits 多图)</option>
-                  <option value="siliconflow">硅基流动 SiliconFlow (Kolors / Qwen-Image)</option>
+                  {IMAGE_PROVIDER_ORDER.map((prov) => (
+                    <option key={prov} value={prov}>
+                      {IMAGE_PROVIDER_PRESETS[prov].title}
+                    </option>
+                  ))}
                 </select>
+              </label>
+
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {IMAGE_PROVIDER_PRESETS[imgProvider].models.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className={`chip-btn ${imgModel === m.id ? "active" : ""}`}
+                    onClick={() => {
+                      setImgModel(m.id);
+                      if (!editingImgId) setImgLabel(m.label);
+                    }}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12 }}>
+                <span style={{ color: "var(--text-secondary)" }}>配置名称标签</span>
+                <input
+                  style={inputStyle}
+                  value={imgLabel}
+                  onChange={(e) => setImgLabel(e.target.value)}
+                  placeholder="例如：Google Nano Banana / 公司 OneAPI 网关"
+                />
               </label>
 
               <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12 }}>
@@ -339,7 +484,7 @@ export function AgentSettingsPage() {
               </label>
 
               <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12 }}>
-                <span style={{ color: "var(--text-secondary)" }}>默认生图模型名</span>
+                <span style={{ color: "var(--text-secondary)" }}>默认生图模型名（支持任意自定义 Model ID）</span>
                 <input
                   style={inputStyle}
                   value={imgModel}
@@ -349,15 +494,28 @@ export function AgentSettingsPage() {
 
               <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12 }}>
                 <span style={{ color: "var(--text-secondary)" }}>
-                  API Key（{imgConfigured ? "留空则保留现有加密密钥" : "首次保存必填"}）
+                  API Key（{editingImgId ? "留空则保留当前配置已加密密钥" : "新增配置必填"}）
                 </span>
                 <input
                   type="password"
                   style={inputStyle}
                   value={imgKey}
-                  placeholder={imgConfigured ? "••••••••••••••••" : "sk-..."}
+                  placeholder={
+                    editingImgId
+                      ? "••••••••••••••••"
+                      : IMAGE_PROVIDER_PRESETS[imgProvider].keyPlaceholder
+                  }
                   onChange={(e) => setImgKey(e.target.value)}
                 />
+              </label>
+
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-secondary)" }}>
+                <input
+                  type="checkbox"
+                  checked={imgIsDefault}
+                  onChange={(e) => setImgIsDefault(e.target.checked)}
+                />
+                设为默认生图配置（生成时选 auto 自动优先使用此配置）
               </label>
 
               {imgStatus && (
@@ -366,7 +524,7 @@ export function AgentSettingsPage() {
                 </div>
               )}
 
-              <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+              <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
                 <button
                   type="button"
                   className="fc-btn"
@@ -374,10 +532,12 @@ export function AgentSettingsPage() {
                     setImgStatus("正在测试生图接口鉴权...");
                     try {
                       const res = await api.testImageConfig({
+                        id: editingImgId || undefined,
+                        label: imgLabel,
                         provider: imgProvider,
                         base_url: imgBaseUrl,
                         model_name: imgModel,
-                        api_key: imgKey,
+                        api_key: imgKey || undefined,
                       });
                       setImgStatus(res.message);
                     } catch (err) {
@@ -392,21 +552,27 @@ export function AgentSettingsPage() {
                   className="fc-btn fc-btn-obsidian"
                   onClick={async () => {
                     try {
-                      await api.saveImageConfig({
+                      const payload = {
+                        label: imgLabel,
                         provider: imgProvider,
                         base_url: imgBaseUrl,
                         model_name: imgModel,
                         api_key: imgKey || undefined,
-                      });
-                      setImgConfigured(true);
-                      setImgKey("");
+                        is_default: imgIsDefault,
+                      };
+                      const saved = editingImgId
+                        ? await api.updateImageConfig(editingImgId, payload)
+                        : await api.createImageConfig(payload);
+                      const list = await api.listImageConfigs();
+                      setImgConfigs(list);
+                      applyConfigToForm(saved);
                       setImgStatus("生图服务配置已 Fernet 加密保存");
                     } catch (err) {
                       setImgStatus(err instanceof ApiError ? err.message : "保存失败");
                     }
                   }}
                 >
-                  保存生图配置
+                  {editingImgId ? "保存生图配置" : "添加并保存生图配置"}
                 </button>
               </div>
             </section>

@@ -43,6 +43,8 @@ export function CanvasPage() {
   const { canvasId = "" } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const searchParamsRef = useRef(searchParams);
+  searchParamsRef.current = searchParams;
 
   const [user, setUser] = useState<User | null>(null);
   const [canvasName, setCanvasName] = useState("加载中...");
@@ -60,6 +62,7 @@ export function CanvasPage() {
 
   const [assets, setAssets] = useState<Asset[]>([]);
   const [imageConfig, setImageConfig] = useState<ImageModelConfig | null>(null);
+  const [imageConfigs, setImageConfigs] = useState<ImageModelConfig[]>([]);
 
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(false);
@@ -76,6 +79,7 @@ export function CanvasPage() {
   const [genParams, setGenParams] = useState<GenerationParamState>({
     model: "auto",
     aspectRatio: "auto",
+    resolution: "auto",
     quality: "auto",
     inputFidelity: "high",
     transparent: false,
@@ -110,6 +114,11 @@ export function CanvasPage() {
   const dirtyRef = useRef(false);
   const docRef = useRef(doc);
   docRef.current = doc;
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
+  const userRef = useRef(user);
+  userRef.current = user;
+  const saveTimersRef = useRef<{ idb?: number; cloud?: number }>({});
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -149,10 +158,10 @@ export function CanvasPage() {
         const me = await api.me();
         if (!active) return;
         setUser(me);
-        const [snapshot, assetList, imgCfg, runsList, memInfo] = await Promise.all([
+        const [snapshot, assetList, imgCfgs, runsList, memInfo] = await Promise.all([
           api.getCanvas(canvasId),
           api.listAssets(),
-          api.getImageConfig().catch(() => null),
+          api.listImageConfigs().catch(() => [] as ImageModelConfig[]),
           api.listAgentRuns(canvasId).catch(() => [] as AgentRun[]),
           api.getCanvasMemory(canvasId).catch(() => null),
         ]);
@@ -163,7 +172,8 @@ export function CanvasPage() {
         setRevision(snapshot.revision);
         loadedRevisionRef.current = snapshot.revision;
         setAssets(assetList);
-        if (imgCfg) setImageConfig(imgCfg);
+        setImageConfigs(imgCfgs);
+        setImageConfig(imgCfgs.find((c) => c.is_default) || imgCfgs[0] || null);
         setPastRuns(runsList);
         if (memInfo) setCanvasMemory(memInfo);
         if (runsList.length > 0 && !agentRun) {
@@ -196,8 +206,9 @@ export function CanvasPage() {
         }
 
         // Insert asset returning from /assets?canvasId=...
-        const insertAssetId = searchParams.get("insertAssetId");
-        const noticeMsg = searchParams.get("notice");
+        const query = searchParamsRef.current;
+        const insertAssetId = query.get("insertAssetId");
+        const noticeMsg = query.get("notice");
         if (insertAssetId) {
           const target = assetList.find((a) => a.id === insertAssetId);
           if (target) {
@@ -229,6 +240,7 @@ export function CanvasPage() {
           setSearchParams({}, { replace: true });
         }
 
+        docRef.current = initialDoc;
         setDoc(initialDoc);
         fitView(initialDoc.items, window.innerWidth, window.innerHeight);
       } catch (err) {
@@ -245,7 +257,7 @@ export function CanvasPage() {
       active = false;
       unsubSseRef.current?.();
     };
-  }, [canvasId, fitView, navigate, notify, searchParams, setSearchParams]);
+  }, [canvasId, fitView, navigate, notify, setSearchParams]);
 
   // Helper to commit a document mutation onto undo stack and mark dirty (StrictMode-safe)
   const commitDoc = useCallback((updater: (prev: CanvasDocument) => CanvasDocument) => {
@@ -259,6 +271,49 @@ export function CanvasPage() {
     setSyncState("dirty");
   }, []);
 
+  const flushSaveNow = useCallback(async () => {
+    const activeInline = document.querySelector<HTMLTextAreaElement>('textarea[data-inline-editor="true"]');
+    if (activeInline && document.activeElement === activeInline) {
+      activeInline.blur();
+      await new Promise((r) => window.setTimeout(r, 0));
+    }
+    window.clearTimeout(saveTimersRef.current.idb);
+    window.clearTimeout(saveTimersRef.current.cloud);
+    if (!dirtyRef.current || !userRef.current) return;
+
+    await saveCanvasDraft({
+      canvasId,
+      baseRevision: loadedRevisionRef.current,
+      document: docRef.current,
+      viewport: viewportRef.current,
+      updatedAt: Date.now(),
+    });
+    setSyncState("saving");
+    try {
+      const saved = await api.saveCanvas(
+        canvasId,
+        loadedRevisionRef.current,
+        docRef.current,
+        viewportRef.current,
+      );
+      loadedRevisionRef.current = saved.revision;
+      setRevision(saved.revision);
+      dirtyRef.current = false;
+      setSyncState("synced");
+      await clearCanvasDraft(canvasId);
+    } catch {
+      // Draft remains safely persisted in IndexedDB if cloud call failed or raced.
+    }
+  }, [canvasId]);
+
+  const navigateWithFlush = useCallback(
+    async (target: string) => {
+      await flushSaveNow();
+      navigate(target);
+    },
+    [flushSaveNow, navigate],
+  );
+
   // 500ms debounced IndexedDB cache + 1200ms debounced cloud PUT /canvases/{id}
   useEffect(() => {
     if (!dirtyRef.current || !user) return;
@@ -271,6 +326,7 @@ export function CanvasPage() {
         updatedAt: Date.now(),
       });
     }, 500);
+    saveTimersRef.current.idb = idbTimer;
 
     const cloudTimer = window.setTimeout(async () => {
       if (!dirtyRef.current) return;
@@ -289,12 +345,38 @@ export function CanvasPage() {
         }
       }
     }, 1200);
+    saveTimersRef.current.cloud = cloudTimer;
 
     return () => {
       window.clearTimeout(idbTimer);
       window.clearTimeout(cloudTimer);
     };
   }, [doc, viewport, canvasId, user, notify]);
+
+  // Safety net on browser close or Back button unmount: preserve draft + keepalive save
+  useEffect(() => {
+    const flushEmergency = () => {
+      if (!dirtyRef.current || !userRef.current) return;
+      void saveCanvasDraft({
+        canvasId,
+        baseRevision: loadedRevisionRef.current,
+        document: docRef.current,
+        viewport: viewportRef.current,
+        updatedAt: Date.now(),
+      });
+      api.saveCanvasKeepalive(
+        canvasId,
+        loadedRevisionRef.current,
+        docRef.current,
+        viewportRef.current,
+      );
+    };
+    window.addEventListener("pagehide", flushEmergency);
+    return () => {
+      window.removeEventListener("pagehide", flushEmergency);
+      flushEmergency();
+    };
+  }, [canvasId]);
 
   const undoRef = useRef(undoStack);
   undoRef.current = undoStack;
@@ -575,6 +657,7 @@ export function CanvasPage() {
     try {
       if (dockMode === "image") {
         const res = await api.generateImage({
+          config_id: genParams.configId,
           prompt: cleanPrompt,
           reference_asset_ids: refAssetIds,
           model: genParams.model,
@@ -582,7 +665,7 @@ export function CanvasPage() {
           width: 1024,
           height: 1024,
           align_to_16: true,
-          resolution: "auto",
+          resolution: genParams.resolution || "auto",
           aspect_ratio: genParams.aspectRatio,
           transparent: genParams.transparent,
           input_fidelity: genParams.inputFidelity,
@@ -824,27 +907,29 @@ export function CanvasPage() {
 
       {/* Top-Center Header Capsule */}
       <header className="canvas-top-center">
-        <button type="button" className="brand-logo" onClick={() => navigate("/")}>
+        <button type="button" className="brand-logo" onClick={() => void navigateWithFlush("/")}>
           <span className="brand-mark">
             <BrandMarkSvg />
           </span>
           <span>FlowCanvas</span>
         </button>
         <span className="top-divider" />
-        <button type="button" className="top-nav-item" onClick={() => navigate("/")}>
+        <button type="button" className="top-nav-item" onClick={() => void navigateWithFlush("/")}>
           画布库
         </button>
         <button
           type="button"
           className="top-nav-item"
-          onClick={() => navigate(`/assets?canvasId=${encodeURIComponent(canvasId)}`)}
+          onClick={() => void navigateWithFlush(`/assets?canvasId=${encodeURIComponent(canvasId)}`)}
         >
           素材库
         </button>
         <button
           type="button"
           className="top-nav-item"
-          onClick={() => navigate(`/settings/agent?canvasId=${encodeURIComponent(canvasId)}`)}
+          onClick={() =>
+            void navigateWithFlush(`/settings/agent?canvasId=${encodeURIComponent(canvasId)}`)
+          }
         >
           设置
         </button>
@@ -992,7 +1077,7 @@ export function CanvasPage() {
         <button
           type="button"
           className="avatar-pill"
-          onClick={() => navigate("/account")}
+          onClick={() => void navigateWithFlush("/account")}
         >
           <span className="avatar-dot">
             {user ? user.username.slice(0, 1).toUpperCase() : "F"}
@@ -1072,7 +1157,9 @@ export function CanvasPage() {
           setRefAssetIds((prev) => (prev.includes(asset.id) ? prev : [...prev, asset.id]));
         }}
         onTriggerUpload={() => uploadInputRef.current?.click()}
-        onOpenFullAssets={() => navigate(`/assets?canvasId=${encodeURIComponent(canvasId)}`)}
+        onOpenFullAssets={() =>
+          void navigateWithFlush(`/assets?canvasId=${encodeURIComponent(canvasId)}`)
+        }
       />
 
       {/* Right AI Agent Drawer (Harness Memory + Real SSE Thinking + Tool Calls + Revert) */}
@@ -1135,7 +1222,9 @@ export function CanvasPage() {
           setAgentRun(res);
           startRunSse(res.id);
         }}
-        onConfigureModel={() => navigate(`/settings/agent?canvasId=${encodeURIComponent(canvasId)}`)}
+        onConfigureModel={() =>
+          void navigateWithFlush(`/settings/agent?canvasId=${encodeURIComponent(canvasId)}`)
+        }
       />
 
       {/* Bottom-Right Collapsible Minimap */}
@@ -1163,8 +1252,9 @@ export function CanvasPage() {
               onChange={setGenParams}
               onClose={() => setParamsOpen(false)}
               configuredModelLabel={
-                imageConfig?.configured ? `${imageConfig.provider}/${imageConfig.model_name}` : undefined
+                imageConfig?.configured ? `${imageConfig.label || imageConfig.model_name}` : undefined
               }
+              imageConfigs={imageConfigs}
             />
           )}
 

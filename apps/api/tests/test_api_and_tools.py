@@ -249,3 +249,89 @@ def test_validate_plan_and_local_align() -> None:
     assert any(it["type"] == "text" and it["content"] == "标题文字" for it in items)
     # Confirm b64 encoding helper dependency works cleanly
     assert base64.b64encode(b"ok") == b"b2s="
+
+
+@pytest.mark.asyncio
+async def test_multi_image_configs_crud_and_model_routing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "canvas_api.routes.validate_public_https_url",
+        lambda url: url.rstrip("/"),
+    )
+    app, _fake = await _make_test_app(tmp_path)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            reg = await client.post(
+                "/api/auth/register",
+                json={"username": "multi_img_user", "password": "password123"},
+            )
+            assert reg.status_code == 201
+
+            c1 = await client.post(
+                "/api/agent/image-configs",
+                json={
+                    "label": "Gemini Nano Banana",
+                    "provider": "google-gemini",
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                    "model_name": "gemini-2.5-flash-image",
+                    "api_key": "AIza-multi-test-1",
+                    "is_default": True,
+                },
+            )
+            assert c1.status_code == 201
+            c2 = await client.post(
+                "/api/agent/image-configs",
+                json={
+                    "label": "OpenAI GPT 2.5",
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.openai.com/v1",
+                    "model_name": "gpt-image-2.5-sunburst",
+                    "api_key": "sk-multi-test-2",
+                    "is_default": True,
+                },
+            )
+            assert c2.status_code == 201
+            c2_id = c2.json()["id"]
+            c1_id = c1.json()["id"]
+
+            listed = (await client.get("/api/agent/image-configs")).json()
+            assert len(listed) == 2
+            assert listed[0]["id"] == c2_id and listed[0]["is_default"] is True
+            assert not any(c["id"] == c1_id and c["is_default"] for c in listed)
+
+            # Update c1 label/model without resending api_key and make it default
+            upd = await client.put(
+                f"/api/agent/image-configs/{c1_id}",
+                json={
+                    "label": "Nano Banana Pro",
+                    "provider": "google-gemini",
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                    "model_name": "gemini-nano-banana-2.1",
+                    "is_default": True,
+                },
+            )
+            assert upd.status_code == 200
+            assert upd.json()["model_name"] == "gemini-nano-banana-2.1"
+
+            # Verify resolve_user_image_provider routing
+            from canvas_api.image_assets import resolve_user_image_provider
+
+            user_id = uuid.UUID(reg.json()["id"])
+            async with app.state.session_factory() as db:
+                resolved_oai = await resolve_user_image_provider(
+                    db, user_id, app.state.settings, requested_model="gpt-image-2.5-sunburst"
+                )
+                assert getattr(resolved_oai, "provider", None) == "openai-compatible"
+                resolved_gem = await resolve_user_image_provider(
+                    db, user_id, app.state.settings, requested_model="gemini-3.1-flash-image"
+                )
+                assert getattr(resolved_gem, "provider", None) == "google-gemini"
+
+            # Delete current default c1 -> c2 auto-promoted to default
+            deleted = await client.delete(f"/api/agent/image-configs/{c1_id}")
+            assert deleted.status_code == 204
+            remaining = (await client.get("/api/agent/image-configs")).json()
+            assert len(remaining) == 1
+            assert remaining[0]["id"] == c2_id and remaining[0]["is_default"] is True

@@ -157,7 +157,7 @@ export function LeftToolRail(props: LeftToolRailProps) {
                 <option value="serif">编辑衬线体</option>
                 <option value="mono">等宽标注体</option>
               </select>
-              <div style={{ display: "flex", gap: 5 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {[16, 22, 32].map((sz) => (
                   <button
                     key={sz}
@@ -171,7 +171,7 @@ export function LeftToolRail(props: LeftToolRailProps) {
               </div>
             </div>
           ) : (
-            <div style={{ display: "flex", gap: 5 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {[2, 4, 8].map((w) => (
                 <button
                   key={w}
@@ -185,7 +185,7 @@ export function LeftToolRail(props: LeftToolRailProps) {
             </div>
           )}
 
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
             {PALETTE.map((col) => (
               <button
                 key={col}

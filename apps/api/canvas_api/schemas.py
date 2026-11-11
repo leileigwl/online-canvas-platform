@@ -193,19 +193,34 @@ class CanvasMemoryOut(APIModel):
     rejected_feedback: list[str] = Field(default_factory=list)
 
 
+ImageProviderLiteral = Literal[
+    "openai-compatible",
+    "google-gemini",
+    "dashscope",
+    "volcengine-ark",
+    "siliconflow",
+]
+
+
 class ImageModelConfigInput(APIModel):
-    provider: Literal["openai-compatible", "dashscope", "siliconflow"] = "openai-compatible"
+    id: uuid.UUID | None = None
+    label: str = Field(default="", max_length=80)
+    provider: ImageProviderLiteral = "openai-compatible"
     base_url: str = Field(min_length=8, max_length=500)
     model_name: str = Field(min_length=1, max_length=160)
     api_key: str | None = Field(default=None, min_length=8, max_length=1000)
     default_options: dict = Field(default_factory=dict)
+    is_default: bool = True
 
 
 class ImageModelConfigOut(APIModel):
+    id: uuid.UUID | None = None
+    label: str = ""
     provider: str
     base_url: str
     model_name: str
     default_options: dict = Field(default_factory=dict)
+    is_default: bool = True
     configured: bool
 
 
@@ -217,7 +232,18 @@ class ImageGenerationOptions(APIModel):
     align_to_16: bool = True
     resolution: Literal["1K", "2K", "4K", "auto"] = "auto"
     aspect_ratio: Literal[
-        "1:1", "2:3", "3:2", "4:3", "3:4", "16:9", "9:16", "21:9", "9:21", "auto"
+        "1:1",
+        "2:3",
+        "3:2",
+        "4:3",
+        "3:4",
+        "4:5",
+        "5:4",
+        "16:9",
+        "9:16",
+        "21:9",
+        "9:21",
+        "auto",
     ] = "auto"
     transparent: bool = False
     input_fidelity: Literal["high", "low"] = "high"
@@ -285,8 +311,9 @@ class ApplyProposal(APIModel):
 
 
 class GenerationRequest(ImageGenerationOptions):
+    config_id: uuid.UUID | None = None
     prompt: str = Field(min_length=1, max_length=4000)
-    reference_asset_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
+    reference_asset_ids: list[uuid.UUID] = Field(default_factory=list, max_length=14)
 
     @field_validator("reference_asset_ids")
     @classmethod

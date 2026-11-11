@@ -142,16 +142,17 @@ class ModelConfig(UUIDModel):
 
 class ImageModelConfig(UUIDModel):
     __tablename__ = "image_model_configs"
-    __table_args__ = (UniqueConstraint("owner_id", name="uq_image_model_config_owner"),)
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    label: Mapped[str] = mapped_column(String(80), default="")
     provider: Mapped[str] = mapped_column(String(48), default="openai-compatible")
     base_url: Mapped[str] = mapped_column(String(500))
     model_name: Mapped[str] = mapped_column(String(160))
     encrypted_api_key: Mapped[str] = mapped_column(Text)
     default_options: Mapped[dict] = mapped_column(JSON_DOCUMENT, default=dict)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class CanvasMemory(UUIDModel):

@@ -1,8 +1,15 @@
-import { api, ApiError, type CanvasSnapshot, type User } from "@canvas/api-client";
+import {
+  api,
+  ApiError,
+  type CanvasSnapshot,
+  type ImageModelConfig,
+  type User,
+} from "@canvas/api-client";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { StudioHeader } from "../components/StudioHeader";
 import { CloseIcon, ImageIcon } from "../components/Icons";
+import { buildSelectableImageModels } from "../lib/image-presets";
 import {
   fileToPendingRef,
   type PendingHomeRef,
@@ -15,11 +22,13 @@ export function HomePage() {
   const [authChecked, setAuthChecked] = useState(false);
   const [canvases, setCanvases] = useState<CanvasSnapshot[]>([]);
   const [projectId, setProjectId] = useState<string | undefined>(undefined);
+  const [imgConfigs, setImgConfigs] = useState<ImageModelConfig[]>([]);
 
   const [prompt, setPrompt] = useState("");
   const [localRefs, setLocalRefs] = useState<PendingHomeRef[]>([]);
   const [aspectRatio, setAspectRatio] = useState("3:4");
-  const [model, setModel] = useState("qwen-image-2.0");
+  const [model, setModel] = useState("gemini-2.5-flash-image");
+  const [customModelMode, setCustomModelMode] = useState(false);
 
   const [blankModalOpen, setBlankModalOpen] = useState(false);
   const [blankName, setBlankName] = useState("未命名创意画布");
@@ -43,12 +52,20 @@ export function HomePage() {
           return;
         }
         setUser(sess.user);
-        const projects = await api.listProjects();
+        const [projects, imgs] = await Promise.all([
+          api.listProjects(),
+          api.listImageConfigs().catch(() => [] as ImageModelConfig[]),
+        ]);
         if (!active) return;
         const lists = await Promise.all(projects.map((p) => api.listCanvases(p.id)));
         if (!active) return;
         setProjectId(projects[0]?.id);
         setCanvases(lists.flat());
+        setImgConfigs(imgs);
+        if (imgs.length > 0) {
+          const def = imgs.find((c) => c.is_default) || imgs[0];
+          if (def.model_name) setModel(def.model_name);
+        }
       } catch {
         if (active) setUser(null);
       } finally {
@@ -206,14 +223,16 @@ export function HomePage() {
     }
   };
 
+  const selectableModels = buildSelectableImageModels(imgConfigs);
   const ratioList =
     localRefs.length === 0 ? ["3:4", "1:1", "4:3", "16:9"] : ["auto", "1:1", "3:4", "16:9"];
   const modeHint =
     localRefs.length === 0
-      ? "纯文生图参数（需登录且在设置配好生图 Key）"
+      ? "纯文生图 · 支持自定义比例"
       : localRefs.length === 1
-        ? `单图编辑 · ${model} · 默认跟随图1比例`
-        : `多图融合 (${localRefs.length}张) · ${model}`;
+        ? "单图编辑 · 默认跟随图1比例"
+        : `多图融合 (${localRefs.length}张)`;
+  const showSetupLink = authChecked && (!user || imgConfigs.length === 0);
 
   return (
     <div className="dotted-gallery-bg" style={{ paddingBottom: 60 }}>
@@ -361,15 +380,50 @@ export function HomePage() {
                 </select>
                 <select
                   className="param-btn"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  style={{ outline: 0 }}
+                  value={customModelMode ? "__custom__" : model}
+                  onChange={(e) => {
+                    if (e.target.value === "__custom__") {
+                      setCustomModelMode(true);
+                      return;
+                    }
+                    setCustomModelMode(false);
+                    setModel(e.target.value);
+                  }}
+                  style={{ outline: 0, maxWidth: 210 }}
                 >
-                  <option value="qwen-image-2.0">qwen-image-2.0</option>
-                  <option value="gpt-image-1">gpt-image-1</option>
-                  <option value="Kolors">Kolors</option>
+                  {selectableModels.map((item) => (
+                    <option key={`${item.configId || "preset"}-${item.id}`} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                  <option value="__custom__">自定义模型 ID...</option>
                 </select>
-                <span style={{ fontSize: 11, color: "var(--sapphire)" }}>{modeHint}</span>
+                {customModelMode && (
+                  <input
+                    className="param-btn"
+                    style={{ width: 164, outline: 0, background: "#fff" }}
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="输入模型 ID"
+                  />
+                )}
+                <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{modeHint}</span>
+                {showSetupLink && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(user ? "/settings/agent" : "/login?returnTo=/settings/agent")
+                    }
+                    style={{
+                      fontSize: 11.5,
+                      color: "var(--text-secondary)",
+                      textDecoration: "underline",
+                      textUnderlineOffset: 3,
+                    }}
+                  >
+                    去配置生图模型 →
+                  </button>
+                )}
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>

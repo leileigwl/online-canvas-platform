@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urlsplit
 
+import httpcore
 import httpx
 
 
@@ -35,6 +36,43 @@ class ChatCompletionResult:
     completion_tokens: int | None = None
 
 
+def _is_public_global_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if not address.is_global:
+        return False
+    if (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        return _is_public_global_ip(mapped)
+    return True
+
+
+def _resolve_public_ip(hostname: str, port: int) -> str:
+    clean_host = hostname.strip("[]").rstrip(".").lower()
+    if clean_host == "localhost" or clean_host.endswith((".local", ".localhost")):
+        raise ValueError("模型服务地址不能指向本机或局域网")
+    try:
+        try:
+            addresses = [ipaddress.ip_address(clean_host)]
+        except ValueError:
+            addresses = [
+                ipaddress.ip_address(item[4][0].split("%", 1)[0])
+                for item in socket.getaddrinfo(clean_host, port, type=socket.SOCK_STREAM)
+            ]
+    except (OSError, ValueError) as error:
+        raise ValueError("无法解析模型服务地址") from error
+    if not addresses or any(not _is_public_global_ip(addr) for addr in addresses):
+        raise ValueError("模型服务地址不能访问本机、内网或链路本地网络")
+    return str(addresses[0])
+
+
 def validate_public_https_url(value: str) -> str:
     parsed = urlsplit(value)
     if (
@@ -45,24 +83,38 @@ def validate_public_https_url(value: str) -> str:
         or parsed.fragment
     ):
         raise ValueError("模型服务地址必须是有效的 HTTPS URL")
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname == "localhost" or hostname.endswith((".local", ".localhost")):
-        raise ValueError("模型服务地址不能指向本机或局域网")
-    try:
-        try:
-            addresses = [ipaddress.ip_address(hostname)]
-        except ValueError:
-            addresses = [
-                ipaddress.ip_address(item[4][0])
-                for item in socket.getaddrinfo(
-                    hostname, parsed.port or 443, type=socket.SOCK_STREAM
-                )
-            ]
-    except (OSError, ValueError) as error:
-        raise ValueError("无法解析模型服务地址") from error
-    if not addresses or any(not address.is_global for address in addresses):
-        raise ValueError("模型服务地址不能访问本机、内网或链路本地网络")
+    _resolve_public_ip(parsed.hostname, parsed.port or 443)
     return value.rstrip("/")
+
+
+class _PublicOnlyNetworkBackend(httpcore.AnyIOBackend):
+    """Pin TCP sockets directly to the SSRF-validated IP to prevent DNS rebinding."""
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: object | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            pinned_ip = await asyncio.to_thread(_resolve_public_ip, host, port)
+        except ValueError as error:
+            raise httpcore.ConnectError(str(error)) from error
+        return await super().connect_tcp(
+            pinned_ip,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+
+def build_safe_async_client(*, timeout: float = 60.0) -> httpx.AsyncClient:
+    transport = httpx.AsyncHTTPTransport()
+    transport._pool._network_backend = _PublicOnlyNetworkBackend()
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=transport)
 
 
 class OpenAICompatibleChatProvider:
@@ -81,7 +133,7 @@ class OpenAICompatibleChatProvider:
             raise ProviderError("模型输出长度参数配置无效")
         try:
             safe_url = await asyncio.to_thread(validate_public_https_url, base_url)
-            async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
+            async with build_safe_async_client(timeout=60) as client:
                 payload = {
                     "model": model,
                     "messages": [

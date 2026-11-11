@@ -11,9 +11,10 @@ from uuid import UUID
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from canvas_api.providers.chat import validate_public_https_url
+from canvas_api.providers.chat import build_safe_async_client, validate_public_https_url
 
 ALLOWED_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
+DEFAULT_MAX_IMAGE_BYTES = 16 * 1024 * 1024
 _EXT_BY_MIME = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 _DATA_IMAGE_RE = re.compile(r"data:image/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+")
 _MD_IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https://[^\s)]+)\)")
@@ -42,6 +43,7 @@ class ImageGenerationRequest:
     count: int
     reference_images: tuple[ReferenceImage, ...] = ()
     input_fidelity: str = "high"
+    max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES
 
 
 @dataclass(frozen=True)
@@ -80,34 +82,70 @@ class UnconfiguredImageProvider:
         raise ImageProviderNotConfigured("当前没有配置改图服务，请前往「模型与生图设置」配置密钥")
 
 
+def _decode_b64_image(
+    b64_payload: str, *, max_bytes: int = DEFAULT_MAX_IMAGE_BYTES
+) -> GeneratedImage:
+    if len(b64_payload) > (max_bytes * 4 // 3) + 1024:
+        raise ImageProviderError("生图结果体积超过限制")
+    try:
+        raw = base64.b64decode(b64_payload, validate=True)
+    except Exception:
+        raw = base64.b64decode(b64_payload)
+    if len(raw) > max_bytes:
+        raise ImageProviderError("生图结果体积超过限制")
+    return _parse_image_bytes(raw)
+
+
 def _parse_image_bytes(raw: bytes) -> GeneratedImage:
     try:
         with Image.open(io.BytesIO(raw)) as img:
             mime_type = ALLOWED_FORMATS.get(img.format or "")
+            width, height = img.size
+            if width <= 0 or height <= 0 or width > 20_000 or height > 20_000:
+                raise ImageProviderError("生图服务返回的图片尺寸无效")
+            if width * height > 100_000_000:
+                raise ImageProviderError("生图服务返回的图片像素总量超过限制")
+            img.load()
             if mime_type is None:
                 # Re-encode non-standard formats (e.g. BMP/TIFF) cleanly as PNG.
                 buf = io.BytesIO()
                 img.convert("RGBA" if "A" in img.getbands() else "RGB").save(buf, format="PNG")
                 raw = buf.getvalue()
                 mime_type = "image/png"
-            width, height = img.size
-            if width <= 0 or height <= 0 or width > 20_000 or height > 20_000:
-                raise ImageProviderError("生图服务返回的图片尺寸无效")
     except ImageProviderError:
         raise
+    except Image.DecompressionBombError:
+        raise ImageProviderError("生图服务返回的图片像素总量超过限制") from None
     except (UnidentifiedImageError, OSError, ValueError) as error:
         raise ImageProviderError("无法解析生图服务返回的图片内容") from error
     return GeneratedImage(content=raw, mime_type=mime_type, width=width, height=height)
 
 
-async def _fetch_image_url(client: httpx.AsyncClient, url: str) -> GeneratedImage:
+async def _fetch_image_url(
+    client: httpx.AsyncClient, url: str, *, max_bytes: int = DEFAULT_MAX_IMAGE_BYTES
+) -> GeneratedImage:
     try:
         safe_url = await asyncio.to_thread(validate_public_https_url, url)
     except ValueError as error:
         raise ImageProviderError(f"生图结果地址不安全: {error}") from error
+    if callable(getattr(client, "stream", None)):
+        async with client.stream("GET", safe_url) as resp:
+            if resp.status_code >= 400:
+                raise ImageProviderError(f"下载生图结果失败 (HTTP {resp.status_code})")
+            cl = resp.headers.get("content-length")
+            if cl and cl.isdigit() and int(cl) > max_bytes:
+                raise ImageProviderError("生图结果体积超过限制")
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes(chunk_size=65536):
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    raise ImageProviderError("生图结果体积超过限制")
+            return _parse_image_bytes(bytes(buf))
     resp = await client.get(safe_url)
     if resp.status_code >= 400:
         raise ImageProviderError(f"下载生图结果失败 (HTTP {resp.status_code})")
+    if len(resp.content) > max_bytes:
+        raise ImageProviderError("生图结果体积超过限制")
     return _parse_image_bytes(resp.content)
 
 
@@ -140,9 +178,9 @@ def _openai_size(aspect_ratio: str, width: int, height: int) -> str:
     return "1536x1024" if width > height else "1024x1536"
 
 
-def _decode_data_url(data_url: str) -> GeneratedImage:
+def _decode_data_url(data_url: str, *, max_bytes: int = DEFAULT_MAX_IMAGE_BYTES) -> GeneratedImage:
     _, b64_payload = data_url.split(",", 1)
-    return _parse_image_bytes(base64.b64decode(b64_payload))
+    return _decode_b64_image(b64_payload, max_bytes=max_bytes)
 
 
 def _is_chat_image_model(model: str, base_url: str) -> bool:
@@ -174,7 +212,7 @@ class ConfiguredImageProvider:
     async def test_connection(self) -> None:
         safe_url = await asyncio.to_thread(validate_public_https_url, self.base_url)
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+        async with build_safe_async_client(timeout=20) as client:
             if self.provider == "google-gemini":
                 resp = await client.get(
                     f"{safe_url}/models",
@@ -232,7 +270,7 @@ class ConfiguredImageProvider:
     async def _dispatch(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
         safe_url = await asyncio.to_thread(validate_public_https_url, self.base_url)
         model = self.default_model if request.model in {"", "auto"} else request.model
-        async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
+        async with build_safe_async_client(timeout=120) as client:
             if self.provider == "google-gemini":
                 return await self._call_google_gemini(client, safe_url, model, request)
             if self.provider == "dashscope":
@@ -244,19 +282,23 @@ class ConfiguredImageProvider:
             return await self._call_openai(client, safe_url, model, request)
 
     async def _collect_b64_or_urls(
-        self, client: httpx.AsyncClient, items: list[dict], limit: int
+        self,
+        client: httpx.AsyncClient,
+        items: list[dict],
+        limit: int,
+        *,
+        max_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
     ) -> list[GeneratedImage]:
         results: list[GeneratedImage] = []
         for entry in items[:limit]:
             if entry.get("b64_json"):
-                raw = base64.b64decode(entry["b64_json"])
-                results.append(_parse_image_bytes(raw))
+                results.append(_decode_b64_image(str(entry["b64_json"]), max_bytes=max_bytes))
             elif entry.get("url"):
                 url = str(entry["url"])
                 if url.startswith("data:image/"):
-                    results.append(_decode_data_url(url))
+                    results.append(_decode_data_url(url, max_bytes=max_bytes))
                 else:
-                    results.append(await _fetch_image_url(client, url))
+                    results.append(await _fetch_image_url(client, url, max_bytes=max_bytes))
         if not results:
             raise ImageProviderError("生图服务未返回任何可用图片数据")
         return results
@@ -295,7 +337,9 @@ class ConfiguredImageProvider:
                 for p in preds
                 if p.get("bytesBase64Encoded")
             ]
-            return await self._collect_b64_or_urls(client, entries, request.count)
+            return await self._collect_b64_or_urls(
+                client, entries, request.count, max_bytes=request.max_image_bytes
+            )
 
         parts: list[dict[str, object]] = [{"text": request.prompt}]
         for ref in refs:
@@ -346,7 +390,11 @@ class ConfiguredImageProvider:
                 for part in cparts:
                     inline = part.get("inlineData") or part.get("inline_data")
                     if isinstance(inline, dict) and inline.get("data"):
-                        results.append(_parse_image_bytes(base64.b64decode(inline["data"])))
+                        results.append(
+                            _decode_b64_image(
+                                str(inline["data"]), max_bytes=request.max_image_bytes
+                            )
+                        )
             if len(results) >= target_count:
                 break
         if not results:
@@ -443,7 +491,9 @@ class ConfiguredImageProvider:
         if resp.status_code >= 400:
             raise ImageProviderError(f"OpenAI 生图接口错误 (HTTP {resp.status_code})")
         body = resp.json()
-        return await self._collect_b64_or_urls(client, body.get("data") or [], request.count)
+        return await self._collect_b64_or_urls(
+            client, body.get("data") or [], request.count, max_bytes=request.max_image_bytes
+        )
 
     async def _call_openai_chat_image(
         self,
@@ -504,7 +554,9 @@ class ConfiguredImageProvider:
                     entries.append({"url": data_uri})
                 for https_url in _MD_IMAGE_URL_RE.findall(msg_content):
                     entries.append({"url": https_url})
-        return await self._collect_b64_or_urls(client, entries, request.count)
+        return await self._collect_b64_or_urls(
+            client, entries, request.count, max_bytes=request.max_image_bytes
+        )
 
     async def _call_volcengine_ark(
         self,
@@ -548,7 +600,9 @@ class ConfiguredImageProvider:
         if resp.status_code >= 400:
             raise ImageProviderError(f"火山方舟即梦生图错误 (HTTP {resp.status_code})")
         body = resp.json()
-        return await self._collect_b64_or_urls(client, body.get("data") or [], request.count)
+        return await self._collect_b64_or_urls(
+            client, body.get("data") or [], request.count, max_bytes=request.max_image_bytes
+        )
 
     async def _call_dashscope(
         self,
@@ -602,7 +656,9 @@ class ConfiguredImageProvider:
             for part in parts:
                 if isinstance(part, dict) and part.get("image"):
                     image_entries.append({"url": part["image"]})
-        return await self._collect_b64_or_urls(client, image_entries, request.count)
+        return await self._collect_b64_or_urls(
+            client, image_entries, request.count, max_bytes=request.max_image_bytes
+        )
 
     async def _call_siliconflow(
         self,
@@ -636,4 +692,6 @@ class ConfiguredImageProvider:
             raise ImageProviderError(f"硅基流动生图接口错误 (HTTP {resp.status_code})")
         body = resp.json()
         entries = body.get("images") or body.get("data") or []
-        return await self._collect_b64_or_urls(client, entries, request.count)
+        return await self._collect_b64_or_urls(
+            client, entries, request.count, max_bytes=request.max_image_bytes
+        )

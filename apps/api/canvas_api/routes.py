@@ -29,7 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from canvas_api.config import Settings
 from canvas_api.database import get_db_session
-from canvas_api.dependencies import current_user, not_found, optional_user
+from canvas_api.dependencies import (
+    current_user,
+    get_redis_pool,
+    not_found,
+    optional_user,
+    resolve_user_from_token,
+)
 from canvas_api.image_assets import persist_generated_images, resolve_user_image_provider
 from canvas_api.models import (
     AgentRun,
@@ -86,10 +92,11 @@ from canvas_api.schemas import (
 from canvas_api.security import (
     decrypt_secret,
     encrypt_secret,
-    hash_password,
+    enforce_rate_limit,
+    hash_password_async,
     new_session_token,
     token_digest,
-    verify_password,
+    verify_password_async,
 )
 from canvas_api.storage import ObjectStorage
 from canvas_api.tools import apply_canvas_operation, public_tool_specs, validate_plan
@@ -174,18 +181,35 @@ def _asset_out(asset: Asset) -> AssetOut:
     )
 
 
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if forwarded:
+        return forwarded[:64]
+    return request.client.host if request.client else "unknown"
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _inspect_image(content: bytes) -> tuple[str, int, int]:
     try:
-        image = Image.open(io.BytesIO(content))
-        mime_type = ALLOWED_IMAGE_FORMATS.get(image.format or "")
-        width, height = image.size
-        if mime_type is None:
-            raise HTTPException(
-                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "仅支持 JPG、PNG 或 WebP 图片"
-            )
-        if width > 20_000 or height > 20_000 or width * height > 100_000_000:
-            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "图片尺寸超过限制")
-        image.verify()
+        with Image.open(io.BytesIO(content)) as image:
+            mime_type = ALLOWED_IMAGE_FORMATS.get(image.format or "")
+            width, height = image.size
+            if mime_type is None:
+                raise HTTPException(
+                    status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "仅支持 JPG、PNG 或 WebP 图片"
+                )
+            if width <= 0 or height <= 0 or width > 20_000 or height > 20_000:
+                raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "图片尺寸超过限制")
+            if width * height > 100_000_000:
+                raise HTTPException(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "图片像素总量超过限制"
+                )
+            image.load()
+    except HTTPException:
+        raise
     except Image.DecompressionBombError:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "图片像素总量超过限制"
@@ -272,11 +296,18 @@ async def register(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> UserOut:
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_register",
+        _client_ip(request),
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
     username = payload.username.lower()
     existing = await session.scalar(select(User.id).where(func.lower(User.username) == username))
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "用户名已被使用")
-    user = User(username=username, password_hash=hash_password(payload.password))
+    password_hash = await hash_password_async(payload.password)
+    user = User(username=username, password_hash=password_hash)
     session.add(user)
     await session.flush()
     project = Project(owner_id=user.id, name="我的画布")
@@ -333,10 +364,16 @@ async def login(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> UserOut:
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_login",
+        f"{_client_ip(request)}:{payload.username.lower()[:64]}",
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
     user = await session.scalar(
         select(User).where(func.lower(User.username) == payload.username.lower())
     )
-    if user is None or not verify_password(payload.password, user.password_hash):
+    if user is None or not await verify_password_async(payload.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     await _create_session(session, user, request.app.state.settings, response)
     return _user_out(user)
@@ -367,7 +404,14 @@ async def logout(
             await _audit_event(session, row.user_id, "auth.logout", "user", str(row.user_id))
             await session.delete(row)
             await session.commit()
-    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="lax")
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=request.app.state.settings.cookie_secure,
+        samesite="lax",
+    )
+    response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
 
@@ -379,9 +423,15 @@ async def change_password(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> Response:
-    if not verify_password(payload.current_password, user.password_hash):
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_password",
+        str(user.id),
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
+    if not await verify_password_async(payload.current_password, user.password_hash):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "当前密码不正确")
-    user.password_hash = hash_password(payload.new_password)
+    user.password_hash = await hash_password_async(payload.new_password)
     await session.execute(UserSession.__table__.delete().where(UserSession.user_id == user.id))
     await _create_session(
         session,
@@ -402,19 +452,38 @@ async def delete_account(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> Response:
-    if payload.username.lower() != user.username.lower() or not verify_password(
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_delete",
+        str(user.id),
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
+    if payload.username.lower() != user.username.lower() or not await verify_password_async(
         payload.password, user.password_hash
     ):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "账户确认信息不正确")
     assets = list(await session.scalars(select(Asset).where(Asset.owner_id == user.id)))
-    for asset in assets:
-        await request.app.state.object_storage.delete(asset.object_key)
-        await session.delete(asset)
-        await session.commit()
-    await _audit_event(session, user.id, "auth.account_deleted", "user", str(user.id))
+    object_keys = [asset.object_key for asset in assets]
+    deleted_uid = str(user.id)
+    await _audit_event(session, None, "auth.account_deleted", "user", deleted_uid)
     await session.delete(user)
     await session.commit()
-    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="lax")
+    for object_key in object_keys:
+        try:
+            await request.app.state.object_storage.delete(object_key)
+        except Exception as error:
+            logger.warning(
+                "Post-delete asset cleanup failed key=%s error_type=%s",
+                object_key,
+                type(error).__name__,
+            )
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=request.app.state.settings.cookie_secure,
+        samesite="lax",
+    )
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
@@ -794,7 +863,8 @@ async def list_assets(
 ) -> list[AssetOut]:
     query = select(Asset).where(Asset.owner_id == user.id, Asset.temporary.is_(False))
     if search.strip():
-        query = query.where(Asset.name.ilike(f"%{search.strip()}%"))
+        escaped = _escape_like(search.strip())
+        query = query.where(Asset.name.ilike(f"%{escaped}%", escape="\\"))
     if favorite is not None:
         query = query.where(Asset.favorite.is_(favorite))
     rows = await session.scalars(query.order_by(Asset.created_at.desc()))
@@ -860,7 +930,13 @@ async def get_asset_content(
         raise not_found()
     content = await request.app.state.object_storage.get(asset.object_key)
     return Response(
-        content, media_type=asset.mime_type, headers={"Cache-Control": "private, max-age=300"}
+        content,
+        media_type=asset.mime_type,
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'",
+        },
     )
 
 
@@ -985,9 +1061,15 @@ async def save_model_config(
 async def test_model_config(
     payload: ModelConfigInput,
     request: Request,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
 ) -> dict:
     """验证协议可连通；不会保存配置，也不会回显 API 密钥。"""
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "provider_test",
+        str(user.id),
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
     if not payload.api_key:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "测试连接需要提供 API 密钥")
     try:
@@ -1235,6 +1317,12 @@ async def test_image_config(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """验证生图接口地址与 API Key 鉴权状态，绝不保存或回显密钥。"""
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "provider_test",
+        str(user.id),
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
     api_key = payload.api_key
     if not api_key and payload.id is not None:
         saved = await session.scalar(
@@ -1319,6 +1407,7 @@ async def request_image_generation(
         count=payload.count,
         reference_images=tuple(reference_images),
         input_fidelity=payload.input_fidelity,
+        max_image_bytes=request.app.state.settings.max_upload_bytes,
     )
     try:
         generated = await provider.generate(provider_request)
@@ -1418,6 +1507,8 @@ async def create_agent_run(
             )
         )
         if existing:
+            if existing.canvas_id != payload.canvas_id or existing.goal != payload.goal.strip():
+                raise HTTPException(status.HTTP_409_CONFLICT, "幂等键与已有任务参数不一致")
             tasks = list(
                 await session.scalars(
                     select(AgentTask)
@@ -1498,7 +1589,8 @@ async def create_agent_run(
     )
     await _append_event(session, run.id, "queued", {"status": "queued", "goal": run.goal})
     await session.commit()
-    if request.app.state.redis is None:
+    queue = await get_redis_pool(request.app)
+    if queue is None:
         run.status = RunStatus.FAILED
         run.error = "后台任务队列未启用"
         for task in tasks:
@@ -1508,7 +1600,6 @@ async def create_agent_run(
         await session.commit()
     else:
         try:
-            queue = request.app.state.redis
             await queue.enqueue_job("execute_agent_run", str(run.id), _job_id=f"agent-run:{run.id}")
         except Exception:
             run.status = RunStatus.FAILED
@@ -1570,14 +1661,20 @@ async def agent_run_events(
     run_id: uuid.UUID,
     request: Request,
     after: int = 0,
-    user: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
 ) -> StreamingResponse:
-    run = await session.scalar(
-        select(AgentRun.id).where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
-    )
-    if run is None:
-        raise not_found()
+    # Authenticate and authorize in a short-lived session so no DB pool connection
+    # remains checked out while the SSE StreamingResponse stays open.
+    async with request.app.state.session_factory() as auth_session:
+        user = await resolve_user_from_token(
+            auth_session, request.cookies.get(SESSION_COOKIE)
+        )
+        if user is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
+        run = await auth_session.scalar(
+            select(AgentRun.id).where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
+        )
+        if run is None:
+            raise not_found()
 
     async def stream():
         try:
@@ -1655,9 +1752,10 @@ async def cancel_agent_run(
         await _audit_event(session, user.id, "agent_run.canceled", "agent_run", str(run.id))
         await _append_event(session, run.id, "canceled", {"status": "canceled"})
         await session.commit()
-        if request.app.state.redis is not None:
+        redis_pool = await get_redis_pool(request.app)
+        if redis_pool is not None:
             try:
-                await Job(f"agent-run:{run.id}", request.app.state.redis).abort(
+                await Job(f"agent-run:{run.id}", redis_pool).abort(
                     timeout=1.5,
                     poll_delay=0.1,
                 )
@@ -1740,7 +1838,8 @@ async def retry_agent_run(
         session, new_run.id, "queued", {"status": "queued", "retry_of": str(original.id)}
     )
     await session.commit()
-    if request.app.state.redis is None:
+    queue = await get_redis_pool(request.app)
+    if queue is None:
         new_run.status = RunStatus.FAILED
         new_run.error = "任务队列暂不可用，请稍后重试。"
         for task in tasks:
@@ -1752,7 +1851,7 @@ async def retry_agent_run(
         await session.commit()
     else:
         try:
-            await request.app.state.redis.enqueue_job(
+            await queue.enqueue_job(
                 "execute_agent_run", str(new_run.id), _job_id=f"agent-run:{new_run.id}"
             )
         except Exception:
@@ -1896,7 +1995,9 @@ async def apply_agent_proposal(
     session: AsyncSession = Depends(get_db_session),
 ) -> CanvasOut:
     run = await session.scalar(
-        select(AgentRun).where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
+        select(AgentRun)
+        .where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
+        .with_for_update()
     )
     if run is None:
         raise not_found()
@@ -1904,6 +2005,8 @@ async def apply_agent_proposal(
         raise HTTPException(status.HTTP_409_CONFLICT, "当前运行没有可应用的提案")
     if run.proposal.get("applied"):
         raise HTTPException(status.HTTP_409_CONFLICT, "该提案已经应用")
+    if run.proposal.get("rejected"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "该提案已被忽略，请重新发起运行")
     canvas = await _owned_canvas(session, user.id, run.canvas_id)
     if payload.base_revision != canvas.revision or canvas.revision != run.context_revision:
         raise HTTPException(
@@ -1977,14 +2080,14 @@ async def apply_agent_proposal(
     await _record_canvas_version(
         session, canvas.id, previous_revision, previous_document, previous_viewport, force=True
     )
-    canvas.revision = previous_revision + 1
+    next_revision = previous_revision + 1
     run.proposal = {
         **run.proposal,
         "applied": True,
         "audit_undo": {"added_item_ids": added_item_ids, "before_items": before_items},
     }
     await _append_event(
-        session, run.id, "applied", {"status": "succeeded", "canvas_revision": canvas.revision}
+        session, run.id, "applied", {"status": "succeeded", "canvas_revision": next_revision}
     )
     await _audit_event(
         session,
@@ -1994,11 +2097,12 @@ async def apply_agent_proposal(
         str(run.id),
         {
             "canvas_id": str(canvas.id),
-            "canvas_revision": canvas.revision,
+            "canvas_revision": next_revision,
             "operation_count": len(operations),
         },
     )
     await session.commit()
+    session.expire(canvas)
     await session.refresh(canvas)
     return _canvas_out(canvas)
 
@@ -2012,7 +2116,9 @@ async def revert_agent_proposal(
 ) -> CanvasOut:
     """精准回退某一批已应用提案（移除生成的元素并还原受影响对象，不影响后续其他修改）。"""
     run = await session.scalar(
-        select(AgentRun).where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
+        select(AgentRun)
+        .where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
+        .with_for_update()
     )
     if run is None:
         raise not_found()
@@ -2055,7 +2161,7 @@ async def revert_agent_proposal(
     await _record_canvas_version(
         session, canvas.id, previous_revision, previous_document, previous_viewport, force=True
     )
-    canvas.revision = previous_revision + 1
+    next_revision = previous_revision + 1
     run.proposal = {**run.proposal, "reverted": True}
     await _record_memory_rejection(
         session,
@@ -2064,10 +2170,11 @@ async def revert_agent_proposal(
         f"用户回退了指令「{run.goal[:40]}」的方案（{run.summary or '提案'}），勿重复采用。",
     )
     await _append_event(
-        session, run.id, "reverted", {"status": "succeeded", "canvas_revision": canvas.revision}
+        session, run.id, "reverted", {"status": "succeeded", "canvas_revision": next_revision}
     )
     await _audit_event(session, user.id, "agent_proposal.reverted", "agent_run", str(run.id))
     await session.commit()
+    session.expire(canvas)
     await session.refresh(canvas)
     return _canvas_out(canvas)
 
@@ -2079,11 +2186,15 @@ async def reject_agent_proposal(
     session: AsyncSession = Depends(get_db_session),
 ) -> AgentRunOut:
     run = await session.scalar(
-        select(AgentRun).where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
+        select(AgentRun)
+        .where(AgentRun.id == run_id, AgentRun.owner_id == user.id)
+        .with_for_update()
     )
     if run is None:
         raise not_found()
-    if run.proposal and not run.proposal.get("applied"):
+    if run.proposal and run.proposal.get("applied"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "该提案已应用，如需撤销请使用回退功能")
+    if run.proposal and not run.proposal.get("rejected"):
         run.proposal = {**run.proposal, "rejected": True}
         await _record_memory_rejection(
             session,

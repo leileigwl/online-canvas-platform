@@ -1,10 +1,10 @@
 # Session handoff：交接清单
 
-> 最后更新：2026-11-11
+> 最后更新：2026-11-12
 
 ## 当前阶段
 
-**Phase 0–5（Warm Ivory Gallery v6 原型定版、全栈前后端重写、Harness 上下文压缩多轮记忆引擎、单批提案精准回退、以及完整 Playwright + Pytest + Vite 构建验收）全部完成，可随时打包部署或用于简历与面试演示。**
+**Phase 0–5（Warm Ivory Gallery v6 原型定版、全栈前后端重写、Harness 上下文压缩多轮记忆引擎、单批提案精准回退、以及完整 Playwright + Pytest + Vite 构建验收）全部完成；已在 [`AGENTS.md`](../AGENTS.md) 补齐上线前安全审计（`review-security` / `cs-audit` / `endor-labs-agent-kit`）与架构质量 Skill 门控，准备云端 Docker Compose 部署及安全复核即可上线。**
 
 ## 最新修复与新增核心特性（含 Harness 架构）
 

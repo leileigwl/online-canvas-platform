@@ -25,14 +25,16 @@ ALLOWED_IMAGE_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "imag
 
 def inspect_generated_image(content: bytes) -> tuple[str, int, int]:
     try:
-        image = Image.open(io.BytesIO(content))
-        mime_type = ALLOWED_IMAGE_FORMATS.get(image.format or "")
-        width, height = image.size
-        if mime_type is None:
-            raise ImageProviderError("生图服务返回了不支持的图片格式")
-        if width > 20_000 or height > 20_000 or width * height > 100_000_000:
-            raise ImageProviderError("生图服务返回的图片尺寸超过限制")
-        image.verify()
+        with Image.open(io.BytesIO(content)) as image:
+            mime_type = ALLOWED_IMAGE_FORMATS.get(image.format or "")
+            width, height = image.size
+            if mime_type is None:
+                raise ImageProviderError("生图服务返回了不支持的图片格式")
+            if width <= 0 or height <= 0 or width > 20_000 or height > 20_000:
+                raise ImageProviderError("生图服务返回的图片尺寸超过限制")
+            if width * height > 100_000_000:
+                raise ImageProviderError("生图服务返回的图片尺寸超过限制")
+            image.load()
     except ImageProviderError:
         raise
     except Image.DecompressionBombError:

@@ -1,6 +1,12 @@
 {$DOMAIN} {
 	encode zstd gzip
 
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
 	@api path /api/*
 	handle @api {
 		request_body {

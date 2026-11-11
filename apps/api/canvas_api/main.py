@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from arq import create_pool
@@ -10,6 +11,7 @@ from sqlalchemy import text
 
 from canvas_api.config import Settings, get_settings
 from canvas_api.database import create_database
+from canvas_api.dependencies import get_redis_pool
 from canvas_api.models import Base
 from canvas_api.providers.images import UnconfiguredImageProvider
 from canvas_api.routes import router
@@ -28,6 +30,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.object_storage = create_storage(config)
         app.state.image_provider = UnconfiguredImageProvider()
         app.state.redis = None
+        app.state.redis_lock = asyncio.Lock()
         if config.auto_create_schema:
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
@@ -59,7 +62,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health", tags=["health"])
     async def health() -> dict:
-        dependencies = {"database": "ok", "queue": "ok" if app.state.redis else "unavailable"}
+        redis_pool = await get_redis_pool(app)
+        dependencies = {"database": "ok", "queue": "ok" if redis_pool else "unavailable"}
         try:
             async with session_factory() as session:
                 await session.execute(text("SELECT 1"))

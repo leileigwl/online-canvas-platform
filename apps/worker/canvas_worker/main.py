@@ -36,7 +36,7 @@ from canvas_api.tools import TOOL_SPECS, PlanValidationError, validate_plan
 from langgraph.types import StreamWriter
 from sqlalchemy import and_, func, or_, select, update
 
-from canvas_worker.checkpoints import open_checkpointer
+from canvas_worker.checkpoints import ensure_checkpointer_ready, open_checkpointer
 from canvas_worker.orchestration import AgentState, build_agent_graph
 
 COORDINATOR_PROMPT = "\n".join(
@@ -447,9 +447,19 @@ async def _execute_generation_run(
             if not await _set_task_state(session_factory, run_id, 0, RunStatus.RUNNING):
                 raise RunCanceled
             reference_assets: list[Asset] = []
+            raw_cid = generation_settings.get("config_id")
+            try:
+                gen_config_id = uuid.UUID(str(raw_cid)) if raw_cid else None
+            except ValueError:
+                gen_config_id = None
             async with session_factory() as session:
                 provider = await resolve_user_image_provider(
-                    session, owner_id, settings, fallback=fallback_provider
+                    session,
+                    owner_id,
+                    settings,
+                    fallback=fallback_provider,
+                    requested_model=str(generation_settings.get("model") or ""),
+                    config_id=gen_config_id,
                 )
                 if reference_asset_ids:
                     rows = list(
@@ -488,6 +498,7 @@ async def _execute_generation_run(
                 count=generation_settings["count"],
                 reference_images=tuple(reference_images),
                 input_fidelity=generation_settings.get("input_fidelity", "high"),
+                max_image_bytes=max_upload_bytes,
             )
             generated = await provider.generate(request)
             if not generated or len(generated) > request.count:
@@ -804,6 +815,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             transparent=False,
             count=1,
             reference_images=tuple(ref_images),
+            max_image_bytes=settings.max_upload_bytes,
         )
         generated = await img_provider.generate(req)
         if not generated:
@@ -904,9 +916,9 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         ) // 3
         async with session_factory() as mem_save:
             row = await mem_save.scalar(
-                select(CanvasMemory).where(
-                    CanvasMemory.owner_id == owner_id, CanvasMemory.canvas_id == canvas_uuid
-                )
+                select(CanvasMemory)
+                .where(CanvasMemory.owner_id == owner_id, CanvasMemory.canvas_id == canvas_uuid)
+                .with_for_update()
             )
             if row is None:
                 row = CanvasMemory(
@@ -1344,6 +1356,7 @@ async def startup(ctx: dict) -> None:
     ctx["settings"] = settings
     ctx["object_storage"] = create_storage(settings)
     ctx["image_provider"] = UnconfiguredImageProvider()
+    await ensure_checkpointer_ready(settings)
 
 
 async def shutdown(ctx: dict) -> None:

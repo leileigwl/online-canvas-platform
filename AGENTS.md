@@ -18,7 +18,20 @@
 
 ## 外部技术文档与 API 调研
 
-- 涉及第三方服务、SDK 或库 API 选型配置时，优先查询官方最新文档（可结合 Context7 核对当前锁定版本），记录查阅结论而非凭记忆臆测字段；严禁向外部查询服务发送任何 API Key、密码或私有业务数据。
+- 涉及第三方服务、SDK 或库 API 选型配置时，优先查询官方最新文档（结合已安装的 `context7` 插件核对当前锁定版本，如 Konva、LangGraph、ARQ、FastAPI），记录查阅结论而非凭记忆臆测字段；严禁向外部查询服务发送任何 API Key、密码或私有业务数据。
+
+## 开发阶段 Skill 与上线前安全审计门控
+
+> Antigravity 对全局/本地 Skill 采用**按需渐进加载（Progressive Disclosure）**，默认仅加载名称与简介，不会自动载入完整正文；进入对应里程碑时，必须在任务中显式触发下列 Skill / 插件（上线部署前为必过门控）：
+
+- **UI 改版与原型参考阶段**：使用 `mobbin`（参考真实已上线产品交互）、`design-html` / `liquid-glass-design` 与 `prototype`，确认原型后再改 `apps/web/`。
+- **FastAPI / LangGraph Worker / 并发存储改动后**：执行 `source-command-python-review`、`improve-codebase-architecture` 与 `source-command-tdd`，重点审校 PostgreSQL `base_revision` 乐观锁、ARQ 幂等、LangGraph checkpoint 续跑与 `packages/canvas-core` 类型边界。
+- **上线部署 / 公开验收前（强制安全审计门控）**：上线前必须触发 `review-security` / `cs-audit` 与 **`endor-labs-agent-kit`**（`sca-remediation`、`ai-sast-remediation`、`cicd-posture`、`findings-browser`），重点核查：
+  1. BYOK API Key 服务端加密落库与零回显、`.env` / `APP_SECRET_KEY` 生产强校验；
+  2. 自定义 `base_url` 的 `validate_public_https_url` 防 SSRF 过滤；
+  3. Cookie (`HttpOnly` + `SameSite` + `COOKIE_SECURE=true`)、用户资产 `owner_id` 越权访问与 MinIO 私有桶代理防越权；
+  4. 图片上传安全检查、SSE 代理无缓冲与前后端三方依赖 CVE 漏洞扫描。
+  5. 最后配合 `source-command-e2e` 与浏览器 Playwright / Chrome DevTools 完成全栈端到端核验。
 
 ## 何时必须停下来问用户
 

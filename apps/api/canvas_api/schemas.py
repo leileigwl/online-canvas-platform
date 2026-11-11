@@ -25,8 +25,8 @@ class UserCreate(APIModel):
 
 
 class LoginRequest(APIModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class PasswordChange(APIModel):

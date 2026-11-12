@@ -193,6 +193,30 @@ class CanvasMemory(UUIDModel):
     rejected_feedback: Mapped[list] = mapped_column(JSON_DOCUMENT, default=list)
 
 
+class AgentSession(UUIDModel):
+    """Independent per-Agent session with isolated cloud memory & clear-chat boundary."""
+
+    __tablename__ = "agent_sessions"
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    canvas_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("canvases.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(120), default="主对话 Agent")
+    compacted_summary: Mapped[str] = mapped_column(Text, default="")
+    compacted_run_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_compacted_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), default=None
+    )
+    estimated_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_feedback: Mapped[list] = mapped_column(JSON_DOCUMENT, default=list)
+    chat_cleared_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
+
 class RunStatus(enum.StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -212,6 +236,13 @@ class AgentRun(UUIDModel):
     )
     canvas_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("canvases.id", ondelete="CASCADE"), index=True
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+        default=None,
     )
     goal: Mapped[str] = mapped_column(Text)
     reference_asset_ids: Mapped[list] = mapped_column(JSON_DOCUMENT, default=list)

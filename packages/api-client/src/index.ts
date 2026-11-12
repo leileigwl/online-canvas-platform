@@ -112,10 +112,35 @@ export type AgentProposalOperation = {
 export type HarnessRunOptions = {
   use_mock_image?: boolean;
   llm_mode?: "real" | "scripted";
+  loop_mode?: "autonomous" | "pipeline";
   lab_scenario?: "normal" | "collision_repair" | "memory_compaction";
   force_compact?: boolean;
   max_repair_rounds?: number;
+  max_loop_steps?: number;
   compaction_threshold_pct?: number;
+};
+
+export type AutonomousStepRecord = {
+  step: number;
+  action: string;
+  label: string;
+  detail: string;
+};
+
+export type AgentSession = {
+  id: string;
+  canvas_id: string;
+  title: string;
+  compacted_summary: string;
+  compacted_run_count: number;
+  recent_run_count: number;
+  estimated_tokens: number;
+  max_context_tokens: number;
+  compaction_threshold_tokens: number;
+  rejected_feedback: string[];
+  chat_cleared_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type LayoutIssue = {
@@ -144,6 +169,7 @@ export type RepairRoundRecord = {
 export type AgentRun = {
   id: string;
   canvas_id: string;
+  session_id?: string | null;
   goal: string;
   status: string;
   context_revision: number;
@@ -160,6 +186,9 @@ export type AgentRun = {
     applied?: boolean;
     rejected?: boolean;
     reverted?: boolean;
+    reply?: string;
+    steps?: AutonomousStepRecord[];
+    compaction_count?: number;
     review?: {
       approved: boolean;
       passed_verifier?: boolean;
@@ -423,14 +452,42 @@ export const api = {
 
   submitAgentGoal: (input: {
     canvas_id: string;
+    session_id?: string;
     goal: string;
     reference_asset_ids: string[];
     generation_settings?: Omit<ImageGenerationInput, "prompt" | "reference_asset_ids">;
     harness_options?: HarnessRunOptions;
     idempotency_key: string;
   }) => request<AgentRun>("/agent/runs", { method: "POST", body: json(input) }),
-  listAgentRuns: (canvasId: string) =>
-    request<AgentRun[]>(`/agent/runs?canvas_id=${encodeURIComponent(canvasId)}`),
+  listAgentRuns: (canvasId: string, sessionId?: string) =>
+    request<AgentRun[]>(
+      `/agent/runs?canvas_id=${encodeURIComponent(canvasId)}${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`,
+    ),
+  listAgentSessions: (canvasId: string) =>
+    request<AgentSession[]>(`/canvases/${canvasId}/agent-sessions`),
+  createAgentSession: (canvasId: string, title?: string) =>
+    request<AgentSession>(`/canvases/${canvasId}/agent-sessions`, {
+      method: "POST",
+      body: json({ title }),
+    }),
+  clearAgentChat: (
+    sessionId: string,
+    preserve_cloud_memory = true,
+    llm_mode: "real" | "scripted" = "scripted",
+  ) =>
+    request<AgentSession>(`/agent-sessions/${sessionId}/clear-chat`, {
+      method: "POST",
+      body: json({ preserve_cloud_memory, llm_mode }),
+    }),
+  compactSessionMemory: (sessionId: string, llm_mode: "real" | "scripted" = "scripted") =>
+    request<AgentSession>(`/agent-sessions/${sessionId}/memory/compact`, {
+      method: "POST",
+      body: json({ llm_mode }),
+    }),
+  resetSessionMemory: (sessionId: string) =>
+    request<AgentSession>(`/agent-sessions/${sessionId}/memory`, { method: "DELETE" }),
+  deleteAgentSession: (sessionId: string) =>
+    request<void>(`/agent-sessions/${sessionId}`, { method: "DELETE" }),
   getAgentRun: (id: string) => request<AgentRun>(`/agent/runs/${id}`),
   cancelAgentRun: (id: string) => request<AgentRun>(`/agent/runs/${id}/cancel`, { method: "POST" }),
   retryAgentRun: (id: string) => request<AgentRun>(`/agent/runs/${id}/retry`, { method: "POST" }),
@@ -449,10 +506,14 @@ export const api = {
     request<CanvasMemory>(`/canvases/${canvasId}/memory`),
   clearCanvasMemory: (canvasId: string) =>
     request<CanvasMemory>(`/canvases/${canvasId}/memory`, { method: "DELETE" }),
-  inspectCanvasHarness: (canvasId: string, operations: Array<Record<string, unknown>> = []) =>
+  inspectCanvasHarness: (
+    canvasId: string,
+    operations: Array<Record<string, unknown>> = [],
+    options?: { session_id?: string; compaction_threshold_pct?: number },
+  ) =>
     request<HarnessInspectResult>(`/canvases/${canvasId}/harness/inspect`, {
       method: "POST",
-      body: json({ operations }),
+      body: json({ operations, ...options }),
     }),
   compactCanvasMemory: (canvasId: string, llm_mode: "real" | "scripted" = "scripted") =>
     request<CanvasMemory>(`/canvases/${canvasId}/memory/compact`, {
@@ -478,6 +539,8 @@ export function subscribeRunEvents(
     "task_created",
     "task_updated",
     "thinking",
+    "context",
+    "verifier",
     "tool_call",
     "succeeded",
     "failed",

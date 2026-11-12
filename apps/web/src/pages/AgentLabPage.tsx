@@ -3,7 +3,7 @@ import {
   ApiError,
   subscribeRunEvents,
   type AgentRun,
-  type AgentTask,
+  type AgentSession,
   type CanvasSnapshot,
   type HarnessInspectResult,
   type HarnessRunOptions,
@@ -25,17 +25,11 @@ type PreviewBox = {
   src?: string;
 };
 
-type PersonaCardInfo = {
-  key: string;
-  role: string;
-  subtitle: string;
-  status: string;
-  model: string;
-  promptTokens?: number;
-  completionTokens?: number;
-  durationMs?: number;
-  detailText: string;
-  rawPayload?: unknown;
+type TraceStep = {
+  id: string;
+  action: string;
+  label: string;
+  detail: string;
 };
 
 function buildPreviewBoxes(
@@ -112,148 +106,53 @@ function buildPreviewBoxes(
   return boxes;
 }
 
-function statusPillStyle(status: string): { bg: string; color: string; label: string } {
-  switch (status) {
-    case "running":
-      return { bg: "rgba(37, 99, 235, 0.12)", color: "#1d4ed8", label: "思考/执行中" };
-    case "succeeded":
-      return { bg: "var(--emerald-soft)", color: "#047857", label: "完成" };
+function actionBadge(action: string): { text: string; bg: string; color: string } {
+  switch (action) {
+    case "compact":
+      return { text: "记忆压缩", bg: "rgba(5, 150, 105, 0.12)", color: "#047857" };
+    case "plan":
+      return { text: "拆解", bg: "rgba(79, 70, 229, 0.10)", color: "#4338ca" };
+    case "design_canvas":
+    case "tool_call":
+      return { text: "设计", bg: "rgba(37, 99, 235, 0.10)", color: "#1d4ed8" };
+    case "verifier":
+      return { text: "校验", bg: "rgba(217, 119, 6, 0.12)", color: "#b45309" };
     case "repair":
-      return { bg: "rgba(217, 119, 6, 0.14)", color: "#b45309", label: "驳回重修" };
-    case "failed":
-      return { bg: "var(--danger-soft)", color: "var(--danger)", label: "失败" };
+      return { text: "自修", bg: "rgba(220, 38, 38, 0.10)", color: "#b91c1c" };
+    case "inspect_canvas":
+      return { text: "读画布", bg: "rgba(87, 83, 78, 0.10)", color: "#44403c" };
     default:
-      return { bg: "var(--bg-ivory-2)", color: "var(--text-muted)", label: "待命" };
+      return { text: "思考", bg: "var(--bg-ivory-2)", color: "var(--text-secondary)" };
   }
 }
 
-function buildPersonaCards(
-  run: AgentRun | null,
-  events: RunStreamEvent[],
-  inspect: HarnessInspectResult | null,
-  llmMode: "real" | "scripted",
-): PersonaCardInfo[] {
-  const defaultModel =
-    llmMode === "scripted"
-      ? "scripted-harness"
-      : inspect?.active_model?.model_name || "BYOK LLM";
-  const roleModels = inspect?.active_model?.role_models || {};
-  const tasks = run?.tasks || [];
-
-  const taskStatusForRole = (roleName: string): AgentTask[] =>
-    tasks.filter((t) => t.role === roleName);
-
-  const metaOf = (taskList: AgentTask[]) => {
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let durationMs = 0;
-    let model = "";
-    for (const t of taskList) {
-      const m = (t.output as Record<string, unknown> | null)?._meta as
-        | Record<string, unknown>
-        | undefined;
-      if (!m) continue;
-      if (typeof m.prompt_tokens === "number") promptTokens += m.prompt_tokens;
-      if (typeof m.completion_tokens === "number") completionTokens += m.completion_tokens;
-      if (typeof m.duration_ms === "number") durationMs += m.duration_ms;
-      if (typeof m.model === "string") model = m.model;
+function liveStepsFromEvents(events: RunStreamEvent[]): TraceStep[] {
+  const steps: TraceStep[] = [];
+  for (const evt of events) {
+    if (evt.type === "thinking") {
+      steps.push({
+        id: `evt-${evt.sequence}`,
+        action: String(evt.data.action || "think"),
+        label: String(evt.data.title || "思考中"),
+        detail: String(evt.data.text || ""),
+      });
+    } else if (evt.type === "tool_call") {
+      steps.push({
+        id: `evt-${evt.sequence}`,
+        action: "tool_call",
+        label: String(evt.data.label || evt.data.tool || "工具调用"),
+        detail: JSON.stringify(evt.data.params || {}),
+      });
+    } else if (evt.type === "verifier") {
+      steps.push({
+        id: `evt-${evt.sequence}`,
+        action: "verifier",
+        label: String(evt.data.title || "几何校验"),
+        detail: String(evt.data.text || ""),
+      });
     }
-    return {
-      promptTokens: promptTokens || undefined,
-      completionTokens: completionTokens || undefined,
-      durationMs: durationMs || undefined,
-      model,
-    };
-  };
-
-  const aggregateStatus = (taskList: AgentTask[]): string => {
-    if (taskList.length === 0) return "idle";
-    if (taskList.some((t) => t.status === "running")) return "running";
-    if (taskList.some((t) => t.status === "failed")) return "failed";
-    if (taskList.every((t) => t.status === "succeeded")) return "succeeded";
-    return "idle";
-  };
-
-  const latestThinking = (roleName: string) =>
-    [...events]
-      .reverse()
-      .find((e) => (e.type === "thinking" || e.type === "verifier") && e.data.role === roleName);
-
-  const roles: Array<{ key: string; role: string; subtitle: string }> = [
-    { key: "coordinator", role: "Coordinator", subtitle: "目标拆解 & Harness 路由" },
-    { key: "planner", role: "Planner", subtitle: "空间构图 & 工具规划" },
-    { key: "editor", role: "Canvas Editor", subtitle: "白名单工具执行 & 生图" },
-    { key: "verifier", role: "Verifier", subtitle: "确定性几何/契约校验" },
-    { key: "reviewer", role: "Reviewer", subtitle: "终审质量把关 & 打回闭环" },
-  ];
-
-  return roles.map(({ key, role, subtitle }) => {
-    if (role === "Verifier") {
-      const vEvt = [...events].reverse().find((e) => e.type === "verifier");
-      const vProp = run?.proposal?.verifier;
-      const passed = vEvt ? Boolean(vEvt.data.passed) : vProp ? Boolean(vProp.passed) : undefined;
-      const issueCount = vEvt
-        ? Number(vEvt.data.issue_count || 0)
-        : Number(vProp?.issue_count || 0);
-      const status =
-        passed === true
-          ? "succeeded"
-          : passed === false
-            ? run?.status === "running"
-              ? "repair"
-              : "failed"
-            : "idle";
-      return {
-        key,
-        role,
-        subtitle,
-        status,
-        model: "deterministic-code",
-        detailText:
-          passed === undefined
-            ? "等待 Canvas Editor 提案..."
-            : passed
-              ? "几何碰撞 & 边界校验全部通过（0 冲突）"
-              : `检出 ${issueCount} 处几何/契约问题，触发闭环反馈`,
-        rawPayload: vEvt?.data || vProp || null,
-      };
-    }
-
-    const list = taskStatusForRole(role);
-    const meta = metaOf(list);
-    const thought = latestThinking(role);
-    const firstErr = list.find((t) => t.error)?.error;
-    let status = aggregateStatus(list);
-    if (
-      role === "Reviewer" &&
-      status === "idle" &&
-      run?.proposal?.repair_history &&
-      run.proposal.repair_history.some((r) => !r.approved) &&
-      run.status === "running"
-    ) {
-      status = "repair";
-    }
-    const detailText = firstErr
-      ? `报错：${firstErr}`
-      : thought
-        ? `${String(thought.data.title || "")}${thought.data.text ? ` · ${String(thought.data.text)}` : ""}`
-        : list.length > 0
-          ? list.map((t) => `${t.title} (${t.status})`).join(" / ")
-          : "等待上游角色交接...";
-
-    return {
-      key,
-      role,
-      subtitle,
-      status,
-      model: meta.model || roleModels[role] || defaultModel,
-      promptTokens: meta.promptTokens,
-      completionTokens: meta.completionTokens,
-      durationMs: meta.durationMs,
-      detailText,
-      rawPayload: list.length === 1 ? list[0] : list,
-    };
-  });
+  }
+  return steps;
 }
 
 export function AgentLabPage() {
@@ -265,51 +164,73 @@ export function AgentLabPage() {
   const [canvases, setCanvases] = useState<CanvasSnapshot[]>([]);
   const [selectedCanvasId, setSelectedCanvasId] = useState<string>(routeCanvasId || "");
   const [snapshot, setSnapshot] = useState<CanvasSnapshot | null>(null);
+  const [sessions, setSessions] = useState<AgentSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [inspect, setInspect] = useState<HarnessInspectResult | null>(null);
 
-  const [goal, setGoal] = useState(
-    "生成一张暖象牙极简香氛静物主图，并在右侧配一张无重叠的设计说明卡片",
-  );
+  const [goal, setGoal] = useState("");
   const [llmMode, setLlmMode] = useState<"scripted" | "real">("real");
   const [useMockImage, setUseMockImage] = useState(true);
   const [labScenario, setLabScenario] = useState<
     "normal" | "collision_repair" | "memory_compaction"
   >("normal");
   const [forceCompact, setForceCompact] = useState(false);
-  const [maxRepairRounds, setMaxRepairRounds] = useState(2);
   const [compactionThresholdPct, setCompactionThresholdPct] = useState(65);
 
-  const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [events, setEvents] = useState<RunStreamEvent[]>([]);
-  const [selectedPersonaKey, setSelectedPersonaKey] = useState<string>("coordinator");
-  const [leftTab, setLeftTab] = useState<"layout" | "context" | "events">("layout");
+  const [expandedRunIds, setExpandedRunIds] = useState<Record<string, boolean>>({});
+  const [rightTab, setRightTab] = useState<"context" | "layout" | "events">("context");
   const [statusMsg, setStatusMsg] = useState<{ kind: "info" | "error"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const unsubRef = useRef<(() => void) | null>(null);
+  const chatBottomRef = useRef<HTMLDivElement | null>(null);
 
-  const refreshCanvasState = useCallback(async (cid: string, preferRunId?: string) => {
-    if (!cid) return;
-    const [snap, insp, hist] = await Promise.all([
-      api.getCanvas(cid),
-      api.inspectCanvasHarness(cid, []),
-      api.listAgentRuns(cid),
-    ]);
-    setSnapshot(snap);
-    setInspect(insp);
-    setRuns(hist);
-    if (insp.active_model?.configured === false) {
-      setLlmMode("scripted");
-    }
-    if (preferRunId) {
-      const target = hist.find((r) => r.id === preferRunId);
-      if (target) setActiveRun(target);
-    } else if (hist.length > 0) {
-      setActiveRun((prev) => (prev && prev.canvas_id === cid ? hist.find((r) => r.id === prev.id) || hist[0] : hist[0]));
-    } else {
-      setActiveRun(null);
-    }
-  }, []);
+  const activeSession = useMemo(
+    () => sessions.find((s) => s.id === activeSessionId) || null,
+    [sessions, activeSessionId],
+  );
+
+  const refreshSessionView = useCallback(
+    async (
+      cid: string,
+      sid: string,
+      thresholdPct: number,
+      preferRunId?: string,
+    ) => {
+      if (!cid || !sid) return;
+      const [snap, sessList, insp, hist] = await Promise.all([
+        api.getCanvas(cid),
+        api.listAgentSessions(cid),
+        api.inspectCanvasHarness(cid, [], {
+          session_id: sid,
+          compaction_threshold_pct: thresholdPct,
+        }),
+        api.listAgentRuns(cid, sid),
+      ]);
+      setSnapshot(snap);
+      setSessions(sessList);
+      setInspect(insp);
+      setRuns(hist);
+      if (insp.active_model?.configured === false) {
+        setLlmMode("scripted");
+      }
+      if (preferRunId) {
+        const target = hist.find((r) => r.id === preferRunId);
+        if (target) setActiveRun(target);
+      } else if (hist.length > 0) {
+        setActiveRun((prev) =>
+          prev && prev.session_id === sid
+            ? hist.find((r) => r.id === prev.id) || hist[0]
+            : hist[0],
+        );
+      } else {
+        setActiveRun(null);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     let active = true;
@@ -347,155 +268,213 @@ export function AgentLabPage() {
 
   useEffect(() => {
     if (!selectedCanvasId || !user) return;
-    void refreshCanvasState(selectedCanvasId);
-  }, [selectedCanvasId, user, refreshCanvasState]);
+    let active = true;
+    (async () => {
+      const sessList = await api.listAgentSessions(selectedCanvasId);
+      if (!active) return;
+      setSessions(sessList);
+      const nextSid = sessList.some((s) => s.id === activeSessionId)
+        ? activeSessionId
+        : sessList[0]?.id || "";
+      if (nextSid && nextSid !== activeSessionId) {
+        setActiveSessionId(nextSid);
+        return;
+      }
+      if (nextSid) {
+        await refreshSessionView(selectedCanvasId, nextSid, compactionThresholdPct);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedCanvasId, user, activeSessionId, compactionThresholdPct, refreshSessionView]);
 
-  const subscribeToRun = useCallback((runId: string, cid: string) => {
-    unsubRef.current?.();
-    setEvents([]);
-    unsubRef.current = subscribeRunEvents(
-      runId,
-      async (evt) => {
-        setEvents((prev) =>
-          prev.some((p) => p.sequence === evt.sequence) ? prev : [...prev, evt],
-        );
-        if (evt.type === "task_created" || evt.type === "task_updated") {
-          void api.getAgentRun(runId).then(setActiveRun).catch(() => {});
-        }
-        if (evt.type === "context") {
-          void api.inspectCanvasHarness(cid, []).then(setInspect).catch(() => {});
-        }
-        if (evt.type === "succeeded" || evt.type === "failed" || evt.type === "canceled") {
-          const [latestRun, insp, hist, snap] = await Promise.all([
-            api.getAgentRun(runId),
-            api.inspectCanvasHarness(cid, []),
-            api.listAgentRuns(cid),
-            api.getCanvas(cid),
-          ]);
-          setActiveRun(latestRun);
-          setInspect(insp);
-          setRuns(hist);
-          setSnapshot(snap);
-          setBusy(false);
-          if (latestRun.status === "failed" && latestRun.error) {
-            setStatusMsg({ kind: "error", text: `运行失败：${latestRun.error}` });
-          } else if (latestRun.status === "succeeded") {
-            setStatusMsg({ kind: "info", text: "Agent 闭环运行完成，可检查右侧人物状态与提案结果。" });
+  const subscribeToRun = useCallback(
+    (runId: string, cid: string, sid: string, thresholdPct: number) => {
+      unsubRef.current?.();
+      setEvents([]);
+      unsubRef.current = subscribeRunEvents(
+        runId,
+        async (evt) => {
+          setEvents((prev) =>
+            prev.some((p) => p.sequence === evt.sequence) ? prev : [...prev, evt],
+          );
+          if (evt.type === "task_created" || evt.type === "task_updated") {
+            void api.getAgentRun(runId).then(setActiveRun).catch(() => {});
           }
-        }
-      },
-      () => {
-        setBusy(false);
-      },
-    );
-  }, []);
+          if (evt.type === "context") {
+            void api
+              .inspectCanvasHarness(cid, [], {
+                session_id: sid,
+                compaction_threshold_pct: thresholdPct,
+              })
+              .then(setInspect)
+              .catch(() => {});
+          }
+          if (evt.type === "succeeded" || evt.type === "failed" || evt.type === "canceled") {
+            await refreshSessionView(cid, sid, thresholdPct, runId);
+            setBusy(false);
+          }
+        },
+        () => {
+          setBusy(false);
+        },
+      );
+    },
+    [refreshSessionView],
+  );
 
-  const handleLaunchRun = async () => {
-    if (!selectedCanvasId || !goal.trim() || busy) return;
+  const handleSendMessage = async (overrideGoal?: string, overrideScenario?: typeof labScenario) => {
+    const promptText = (overrideGoal ?? goal).trim();
+    if (!selectedCanvasId || !activeSessionId || !promptText || busy) return;
+    const scenarioToUse = overrideScenario ?? labScenario;
     setStatusMsg(null);
     setBusy(true);
+    if (!overrideGoal) setGoal("");
     try {
       const harness_options: HarnessRunOptions = {
         llm_mode: llmMode,
+        loop_mode: "autonomous",
         use_mock_image: useMockImage,
-        lab_scenario: labScenario,
+        lab_scenario: scenarioToUse,
         force_compact: forceCompact,
-        max_repair_rounds: maxRepairRounds,
+        max_repair_rounds: 2,
+        max_loop_steps: 10,
         compaction_threshold_pct: compactionThresholdPct,
       };
       const created = await api.submitAgentGoal({
         canvas_id: selectedCanvasId,
-        goal: goal.trim(),
+        session_id: activeSessionId,
+        goal: promptText,
         reference_asset_ids: [],
         harness_options,
         idempotency_key: `lab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       });
+      setRuns((prev) => [created, ...prev]);
       setActiveRun(created);
+      setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
       if (created.status === "failed") {
         setBusy(false);
-        setStatusMsg({ kind: "error", text: created.error || "Agent 运行失败" });
+        setStatusMsg({ kind: "error", text: created.error || "Agent 执行失败" });
         return;
       }
-      subscribeToRun(created.id, selectedCanvasId);
+      subscribeToRun(created.id, selectedCanvasId, activeSessionId, compactionThresholdPct);
     } catch (err) {
       setBusy(false);
       setStatusMsg({
         kind: "error",
-        text: err instanceof ApiError ? err.message : "启动实验运行失败",
+        text: err instanceof ApiError ? err.message : "发送指令失败",
       });
     }
   };
 
-  const handleApplyProposal = async () => {
-    if (!activeRun || !snapshot) return;
-    try {
-      const updated = await api.applyProposal(activeRun.id, snapshot.revision);
-      setSnapshot(updated);
-      await refreshCanvasState(selectedCanvasId, activeRun.id);
-      setStatusMsg({ kind: "info", text: `提案已应用至真实画布（revision v${updated.revision}）` });
-    } catch (err) {
-      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "应用失败" });
-    }
+  const handleCreateNewAgent = async () => {
+    if (!selectedCanvasId || busy) return;
+    unsubRef.current?.();
+    const created = await api.createAgentSession(selectedCanvasId);
+    setSessions((prev) => [created, ...prev]);
+    setActiveSessionId(created.id);
+    setRuns([]);
+    setActiveRun(null);
+    setEvents([]);
+    setStatusMsg({
+      kind: "info",
+      text: `已开启完全独立的「${created.title}」（全新空白上下文与独立云端记忆）`,
+    });
   };
 
-  const handleRevertProposal = async () => {
-    if (!activeRun || !snapshot) return;
-    try {
-      const reverted = await api.revertProposal(activeRun.id, snapshot.revision);
-      setSnapshot(reverted);
-      await refreshCanvasState(selectedCanvasId, activeRun.id);
-      setStatusMsg({
-        kind: "info",
-        text: "已整批撤回该提案，并将回退信号记录至 Harness 否决记忆。",
-      });
-    } catch (err) {
-      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "撤回失败" });
-    }
-  };
-
-  const handleRejectProposal = async () => {
-    if (!activeRun) return;
-    try {
-      await api.rejectProposal(activeRun.id);
-      await refreshCanvasState(selectedCanvasId, activeRun.id);
-      setStatusMsg({ kind: "info", text: "已否决该提案并注入 Harness 避坑记忆。" });
-    } catch (err) {
-      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "否决失败" });
-    }
+  const handleClearCurrentChat = async () => {
+    if (!activeSessionId || !selectedCanvasId || busy) return;
+    await api.clearAgentChat(activeSessionId, true, llmMode);
+    setRuns([]);
+    setActiveRun(null);
+    setEvents([]);
+    await refreshSessionView(selectedCanvasId, activeSessionId, compactionThresholdPct);
+    setStatusMsg({
+      kind: "info",
+      text: "已清除上方聊天对话与短期消息，但保留了当前 Agent 在云端的历史记忆摘要。",
+    });
   };
 
   const handleCompactMemory = async () => {
-    if (!selectedCanvasId) return;
+    if (!selectedCanvasId || !activeSessionId) return;
     setStatusMsg(null);
     try {
-      const res = await api.compactCanvasMemory(selectedCanvasId, llmMode);
-      const insp = await api.inspectCanvasHarness(selectedCanvasId, []);
-      setInspect(insp);
+      const updatedSess = await api.compactSessionMemory(activeSessionId, llmMode);
+      await refreshSessionView(selectedCanvasId, activeSessionId, compactionThresholdPct);
       setStatusMsg({
         kind: "info",
-        text: `上下文压缩完成：已蒸馏 ${res.compacted_run_count} 轮历史，核心记忆摘要已更新。`,
+        text: `已手工触发记忆压缩：累计沉淀 ${updatedSess.compacted_run_count} 轮决策至云端记忆。`,
       });
     } catch (err) {
       setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "压缩失败" });
     }
   };
 
-  const handleClearMemory = async () => {
-    if (!selectedCanvasId) return;
-    await api.clearCanvasMemory(selectedCanvasId);
-    const insp = await api.inspectCanvasHarness(selectedCanvasId, []);
-    setInspect(insp);
-    setStatusMsg({ kind: "info", text: "已清空当前画布的 Harness 核心记忆与避坑记录。" });
+  const handleResetSessionMemory = async () => {
+    if (!selectedCanvasId || !activeSessionId) return;
+    await api.resetSessionMemory(activeSessionId);
+    await refreshSessionView(selectedCanvasId, activeSessionId, compactionThresholdPct);
+    setStatusMsg({
+      kind: "info",
+      text: "已彻底重置当前 Agent 的云端记忆摘要与避坑记录。",
+    });
+  };
+
+  const handleApplyProposal = async (runToApply: AgentRun) => {
+    if (!snapshot) return;
+    try {
+      const updated = await api.applyProposal(runToApply.id, snapshot.revision);
+      setSnapshot(updated);
+      await refreshSessionView(selectedCanvasId, activeSessionId, compactionThresholdPct, runToApply.id);
+      setStatusMsg({ kind: "info", text: `提案已写入画布（revision v${updated.revision}）` });
+    } catch (err) {
+      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "应用失败" });
+    }
+  };
+
+  const handleRevertProposal = async (runToRevert: AgentRun) => {
+    if (!snapshot) return;
+    try {
+      const reverted = await api.revertProposal(runToRevert.id, snapshot.revision);
+      setSnapshot(reverted);
+      await refreshSessionView(
+        selectedCanvasId,
+        activeSessionId,
+        compactionThresholdPct,
+        runToRevert.id,
+      );
+      setStatusMsg({ kind: "info", text: "已整批撤回该提案，并记入当前 Agent 避坑记忆。" });
+    } catch (err) {
+      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "撤回失败" });
+    }
+  };
+
+  const handleRejectProposal = async (runToReject: AgentRun) => {
+    try {
+      await api.rejectProposal(runToReject.id);
+      await refreshSessionView(
+        selectedCanvasId,
+        activeSessionId,
+        compactionThresholdPct,
+        runToReject.id,
+      );
+      setStatusMsg({ kind: "info", text: "已否决该提案并写入避坑记忆。" });
+    } catch (err) {
+      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "否决失败" });
+    }
   };
 
   const handleCreateTestCanvas = async () => {
     const projects = await api.listProjects();
     const created = await api.createCanvas(
-      `Harness 测试画布 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
+      `Agent 测试画布 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
       projects[0]?.id,
     );
     setCanvases((prev) => [created, ...prev]);
     setSelectedCanvasId(created.id);
+    setActiveSessionId("");
+    setRuns([]);
     setActiveRun(null);
     setEvents([]);
   };
@@ -514,27 +493,25 @@ export function AgentLabPage() {
     return `${minX} ${minY} ${Math.max(360, maxX - minX)} ${Math.max(240, maxY - minY)}`;
   }, [previewBoxes]);
 
-  const personaCards = useMemo(
-    () => buildPersonaCards(activeRun, events, inspect, llmMode),
-    [activeRun, events, inspect, llmMode],
-  );
-  const selectedPersona =
-    personaCards.find((p) => p.key === selectedPersonaKey) || personaCards[0];
-
   const latestContextEvt = useMemo(
     () => [...events].reverse().find((e) => e.type === "context"),
     [events],
   );
 
-  // Compute Claude-Code-style segmented token bar metrics
+  const liveStreamSteps = useMemo(() => liveStepsFromEvents(events), [events]);
+
   const tokenMeter = useMemo(() => {
+    const evtBd = (latestContextEvt?.data?.breakdown || null) as Record<string, number> | null;
     const tb = inspect?.token_breakdown;
-    const maxTok = tb?.max_context_tokens || 32768;
-    const sysTok = tb?.system_prompts_tokens ?? 620;
-    const canvasTok = tb?.canvas_brief_tokens ?? 0;
-    const coreTok = tb?.core_memory_tokens ?? 0;
-    const recentTok = tb?.recent_turns_tokens ?? 0;
-    const liveTok = activeRun?.completion_tokens_used ?? tb?.live_run_tokens ?? 0;
+    const maxTok = evtBd?.max_context_tokens || tb?.max_context_tokens || 32768;
+    const sysTok = evtBd?.system_prompts_tokens ?? tb?.system_prompts_tokens ?? 520;
+    const canvasTok = evtBd?.canvas_brief_tokens ?? tb?.canvas_brief_tokens ?? 0;
+    const coreTok = evtBd?.core_memory_tokens ?? tb?.core_memory_tokens ?? 0;
+    const recentTok = evtBd?.recent_turns_tokens ?? tb?.recent_turns_tokens ?? 0;
+    const liveTok =
+      busy && evtBd
+        ? evtBd.live_run_tokens ?? 0
+        : activeRun?.completion_tokens_used ?? tb?.live_run_tokens ?? 0;
     const totalTok = sysTok + canvasTok + coreTok + recentTok + liveTok;
     const thresholdTok = Math.round(maxTok * (compactionThresholdPct / 100));
     const pct = (n: number) => Math.min(100, Math.round((n / Math.max(1, maxTok)) * 1000) / 10);
@@ -553,19 +530,23 @@ export function AgentLabPage() {
       corePct: pct(coreTok),
       recentPct: pct(recentTok),
       livePct: pct(liveTok),
+      compactedSaved: Number(latestContextEvt?.data?.compacted_saved_tokens || 0),
+      compactedInLoop: Boolean(latestContextEvt?.data?.compacted),
     };
-  }, [inspect, activeRun, compactionThresholdPct]);
+  }, [inspect, activeRun, latestContextEvt, compactionThresholdPct, busy]);
+
+  const chronologicalRuns = useMemo(() => [...runs].reverse(), [runs]);
 
   const cardStyle: React.CSSProperties = {
     background: "var(--surface-solid)",
     border: "1px solid var(--border-hairline)",
     borderRadius: 18,
-    padding: 18,
+    padding: 16,
     boxShadow: "var(--shadow-card)",
   };
 
   const controlStyle: React.CSSProperties = {
-    height: 36,
+    height: 34,
     padding: "0 10px",
     borderRadius: 10,
     border: "1px solid var(--border-hairline)",
@@ -574,7 +555,7 @@ export function AgentLabPage() {
   };
 
   return (
-    <div className="dotted-gallery-bg" style={{ minHeight: "100vh", paddingBottom: 56 }}>
+    <div className="dotted-gallery-bg" style={{ minHeight: "100vh", paddingBottom: 40 }}>
       <StudioHeader
         active="lab"
         user={user}
@@ -592,12 +573,22 @@ export function AgentLabPage() {
         }
       />
 
-      <main style={{ width: "min(1340px, calc(100vw - 32px))", margin: "22px auto 0", display: "flex", flexDirection: "column", gap: 16 }}>
+      <main
+        style={{
+          width: "min(1340px, calc(100vw - 32px))",
+          margin: "18px auto 0",
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+        }}
+      >
         {!authChecked ? (
-          <div style={cardStyle}>正在初始化 Agent 实验室...</div>
+          <div style={cardStyle}>正在连接 Agent 会话空间...</div>
         ) : !user ? (
           <div style={{ ...cardStyle, textAlign: "center", padding: 40 }}>
-            <h2 style={{ fontFamily: "var(--font-serif)", marginTop: 0 }}>请先登录使用 Harness & Agent 实验室</h2>
+            <h2 style={{ fontFamily: "var(--font-serif)", marginTop: 0 }}>
+              请先登录使用 AI Agent 自主循环实验室
+            </h2>
             <button
               type="button"
               className="fc-btn fc-btn-obsidian"
@@ -608,250 +599,767 @@ export function AgentLabPage() {
           </div>
         ) : (
           <>
-            {/* Top Experiment Launcher */}
-            <section style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-                <div>
-                  <h1 style={{ fontFamily: "var(--font-serif)", fontSize: 20, margin: "0 0 2px" }}>
-                    Harness & Agent 闭环实验室
-                  </h1>
-                  <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)" }}>
-                    透视真实上下文构成与压缩触发线、多角色人物状态（Coordinator / Planner / Editor / Verifier / Reviewer）及闭环自修复。
-                  </p>
-                </div>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  {inspect?.active_model?.configured && (
-                    <span
-                      style={{
-                        fontSize: 11.5,
-                        padding: "4px 10px",
-                        borderRadius: 99,
-                        background: "var(--emerald-soft)",
-                        color: "#047857",
-                      }}
-                    >
-                      已接入真实模型：{inspect.active_model.model_name}
-                    </span>
-                  )}
-                  <select
-                    style={controlStyle}
-                    value={selectedCanvasId}
-                    onChange={(e) => {
-                      setSelectedCanvasId(e.target.value);
-                      setActiveRun(null);
-                      setEvents([]);
-                    }}
-                  >
-                    {canvases.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} (v{c.revision})
-                      </option>
-                    ))}
-                  </select>
-                  <button type="button" className="fc-btn fc-btn-sm" onClick={handleCreateTestCanvas}>
-                    + 新建测试画布
-                  </button>
-                </div>
-              </div>
-
-              {/* Scenario Presets */}
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>预设联调剧本：</span>
-                <button
-                  type="button"
-                  className={`chip-btn ${labScenario === "normal" && llmMode === "real" ? "active" : ""}`}
-                  onClick={() => {
-                    setLabScenario("normal");
-                    setLlmMode("real");
-                    setUseMockImage(true);
-                    setCompactionThresholdPct(65);
-                    setGoal("生成一张暖象牙极简香氛静物主图，并在右侧配一张无重叠的设计说明卡片");
+            {/* Top Session Switcher & Clear vs New Agent Controls */}
+            <section
+              style={{
+                ...cardStyle,
+                padding: "12px 16px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: 10,
+              }}
+            >
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <strong style={{ fontFamily: "var(--font-serif)", fontSize: 16 }}>
+                  Agent 自主对话工作台
+                </strong>
+                <select
+                  aria-label="选择画布"
+                  style={controlStyle}
+                  value={selectedCanvasId}
+                  onChange={(e) => {
+                    setSelectedCanvasId(e.target.value);
+                    setActiveSessionId("");
+                    setRuns([]);
+                    setActiveRun(null);
+                    setEvents([]);
                   }}
                 >
-                  真实 BYOK LLM + Mock 生图联调
-                </button>
-                <button
-                  type="button"
-                  className={`chip-btn ${labScenario === "collision_repair" ? "active" : ""}`}
-                  onClick={() => {
-                    setLabScenario("collision_repair");
-                    setLlmMode("scripted");
-                    setUseMockImage(true);
-                    setMaxRepairRounds(2);
-                    setGoal("生成暖象牙极简香氛主图并配右侧注释卡（第1轮重叠碰撞 → Reviewer打回 → 第2轮自修复）");
-                  }}
-                >
-                  可控碰撞驳回自修复闭环
-                </button>
-                <button
-                  type="button"
-                  className={`chip-btn ${labScenario === "memory_compaction" ? "active" : ""}`}
-                  onClick={() => {
-                    setLabScenario("memory_compaction");
-                    setLlmMode("real");
-                    setUseMockImage(true);
-                    setForceCompact(true);
-                    setCompactionThresholdPct(10);
-                    setGoal("延续前面画布风格，新增一组材质研究图卡并验证记忆自动压缩");
-                  }}
-                >
-                  真实模型 + 低压缩线自动蒸馏测试
-                </button>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
-                <input
-                  style={{ ...controlStyle, height: 42, padding: "0 14px", fontSize: 13 }}
-                  value={goal}
-                  onChange={(e) => setGoal(e.target.value)}
-                  placeholder="输入实验目标 prompt..."
-                />
-                <button
-                  type="button"
-                  className="fc-btn fc-btn-obsidian"
-                  disabled={busy || !selectedCanvasId}
-                  onClick={handleLaunchRun}
-                  style={{ height: 42, padding: "0 20px" }}
-                >
-                  {busy ? "Agent 闭环执行中..." : "▶ 启动闭环运行"}
-                </button>
-              </div>
-
-              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", fontSize: 12, color: "var(--text-secondary)" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  推理引擎：
-                  <select
-                    style={{ ...controlStyle, height: 30 }}
-                    value={llmMode}
-                    onChange={(e) => setLlmMode(e.target.value as "scripted" | "real")}
-                  >
-                    <option value="real">
-                      真实 BYOK LLM（{inspect?.active_model?.model_name || "需先配置"}）
+                  {canvases.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} (v{c.revision})
                     </option>
-                    <option value="scripted">可控剧本模拟（免 LLM Key）</option>
-                  </select>
-                </label>
-
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={useMockImage}
-                    onChange={(e) => setUseMockImage(e.target.checked)}
-                  />
-                  Mock 生图接口（免Key真实PNG）
-                </label>
-
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  自动压缩线：
-                  <select
-                    style={{ ...controlStyle, height: 30 }}
-                    value={compactionThresholdPct}
-                    onChange={(e) => setCompactionThresholdPct(Number(e.target.value))}
-                  >
-                    <option value={5}>5%（压测极速触发）</option>
-                    <option value={15}>15%（短上下文实验）</option>
-                    <option value={40}>40%</option>
-                    <option value={65}>65%（生产默认）</option>
-                  </select>
-                </label>
-
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  自修复上限：
-                  <select
-                    style={{ ...controlStyle, height: 30 }}
-                    value={maxRepairRounds}
-                    onChange={(e) => setMaxRepairRounds(Number(e.target.value))}
-                  >
-                    <option value={0}>0 轮</option>
-                    <option value={1}>1 轮</option>
-                    <option value={2}>2 轮</option>
-                    <option value={3}>3 轮</option>
-                  </select>
-                </label>
-
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={forceCompact}
-                    onChange={(e) => setForceCompact(e.target.checked)}
-                  />
-                  开跑前强制压缩旧轮次
-                </label>
+                  ))}
+                </select>
+                <button type="button" className="fc-btn fc-btn-sm" onClick={handleCreateTestCanvas}>
+                  + 新建画布
+                </button>
               </div>
 
-              {statusMsg && (
-                <div
-                  style={{
-                    padding: "8px 12px",
-                    borderRadius: 10,
-                    fontSize: 12.5,
-                    background:
-                      statusMsg.kind === "error" ? "var(--danger-soft)" : "var(--emerald-soft)",
-                    color: statusMsg.kind === "error" ? "var(--danger)" : "#047857",
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <select
+                  aria-label="切换独立 Agent"
+                  style={{ ...controlStyle, fontWeight: 600 }}
+                  value={activeSessionId}
+                  onChange={(e) => {
+                    setActiveSessionId(e.target.value);
+                    setActiveRun(null);
+                    setEvents([]);
+                    setStatusMsg(null);
                   }}
                 >
-                  {statusMsg.text}
-                </div>
-              )}
+                  {sessions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.title}
+                      {s.compacted_run_count > 0 ? ` · 云端记忆${s.compacted_run_count}轮` : ""}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="button"
+                  className="fc-btn fc-btn-sm fc-btn-obsidian"
+                  disabled={busy || !selectedCanvasId}
+                  onClick={handleCreateNewAgent}
+                  title="新建完全独立的 Agent 会话（独立聊天与空白云端记忆）"
+                >
+                  + 开启全新 Agent
+                </button>
+
+                <button
+                  type="button"
+                  className="fc-btn fc-btn-sm"
+                  disabled={busy || !activeSessionId}
+                  onClick={handleClearCurrentChat}
+                  title="清除当前聊天气泡与短期消息，但保留该 Agent 的云端压缩记忆"
+                >
+                  清空当前聊天（保留记忆）
+                </button>
+              </div>
             </section>
 
-            {/* Dual-Pane Inspector */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))", gap: 16, alignItems: "start" }}>
-              {/* Left Pane: 2D Spatial Preview + Context Inspector + Raw SSE */}
-              <section style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    <button
-                      type="button"
-                      className={`chip-btn ${leftTab === "layout" ? "active" : ""}`}
-                      onClick={() => setLeftTab("layout")}
-                    >
-                      2D 排版与碰撞透视
-                    </button>
-                    <button
-                      type="button"
-                      className={`chip-btn ${leftTab === "context" ? "active" : ""}`}
-                      onClick={() => setLeftTab("context")}
-                    >
-                      上下文透视 (/context)
-                    </button>
-                    <button
-                      type="button"
-                      className={`chip-btn ${leftTab === "events" ? "active" : ""}`}
-                      onClick={() => setLeftTab("events")}
-                    >
-                      SSE 事件流 ({events.length})
-                    </button>
-                  </div>
-                  {runs.length > 0 && (
-                    <select
-                      style={{ ...controlStyle, height: 30, maxWidth: 250 }}
-                      value={activeRun?.id || ""}
-                      onChange={(e) => {
-                        const found = runs.find((r) => r.id === e.target.value) || null;
-                        setActiveRun(found);
+            {statusMsg && (
+              <div
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 12,
+                  fontSize: 12.5,
+                  background:
+                    statusMsg.kind === "error" ? "var(--danger-soft)" : "var(--emerald-soft)",
+                  color: statusMsg.kind === "error" ? "var(--danger)" : "#047857",
+                }}
+              >
+                {statusMsg.text}
+              </div>
+            )}
+
+            {/* Main Two-Column Layout: Left Minimalist Chat + Right Context & Preview */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
+                gap: 14,
+                alignItems: "start",
+              }}
+            >
+              {/* Left Column: Conversational Lead Agent Thread */}
+              <section
+                style={{
+                  ...cardStyle,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                  minHeight: 560,
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    paddingBottom: 8,
+                    borderBottom: "1px solid var(--border-hairline)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        background: busy ? "#2563eb" : "#10b981",
                       }}
-                    >
-                      {runs.map((r) => (
-                        <option key={r.id} value={r.id}>
-                          [{r.status}] {r.goal.slice(0, 22)}
-                        </option>
-                      ))}
-                    </select>
-                  )}
+                    />
+                    <strong style={{ fontSize: 13.5 }}>
+                      {activeSession?.title || "主对话 Agent"}
+                    </strong>
+                    {activeSession?.chat_cleared_at && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          padding: "2px 8px",
+                          borderRadius: 99,
+                          background: "var(--bg-ivory-2)",
+                          color: "var(--text-secondary)",
+                        }}
+                      >
+                        已清屏 · 保留云端记忆
+                      </span>
+                    )}
+                  </div>
+                  <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
+                    {inspect?.active_model?.configured && llmMode === "real"
+                      ? inspect.active_model.model_name
+                      : "scripted-harness"}
+                  </span>
                 </div>
 
-                {leftTab === "layout" && (
-                  <>
+                {/* Chat Message List */}
+                <div
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 14,
+                    maxHeight: 460,
+                    overflowY: "auto",
+                    paddingRight: 4,
+                  }}
+                >
+                  {chronologicalRuns.length === 0 ? (
                     <div
                       style={{
-                        borderRadius: 14,
-                        border: "1px solid var(--border-hairline)",
-                        background: "#FBF9F6",
-                        padding: 10,
+                        margin: "auto 0",
+                        padding: 24,
+                        textAlign: "center",
+                        color: "var(--text-secondary)",
+                        fontSize: 13,
+                        lineHeight: 1.7,
                       }}
                     >
-                      <svg viewBox={svgViewBox} style={{ width: "100%", height: 290, display: "block" }}>
+                      <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>
+                        {activeSession?.compacted_summary
+                          ? "当前对话已清空，云端核心记忆仍在"
+                          : "与自主主 Agent 开始对话"}
+                      </div>
+                      <div>
+                        发送一条想法，主 Agent 会自行决定何时思考、拆解任务、执行画布设计并自动校验；
+                        中间过程默认折叠收纳，需要时展开即可。
+                      </div>
+                    </div>
+                  ) : (
+                    chronologicalRuns.map((runItem) => {
+                      const isLiveTurn = busy && activeRun?.id === runItem.id;
+                      const persistedSteps = (runItem.proposal?.steps || []).map((s, idx) => ({
+                        id: `${runItem.id}-step-${idx}`,
+                        action: s.action,
+                        label: s.label,
+                        detail: s.detail,
+                      }));
+                      const stepsToRender =
+                        isLiveTurn && liveStreamSteps.length > 0 ? liveStreamSteps : persistedSteps;
+                      const isExpanded = Boolean(expandedRunIds[runItem.id]) || isLiveTurn;
+                      const compactionCount = Number(runItem.proposal?.compaction_count || 0);
+                      const replyText =
+                        runItem.proposal?.reply ||
+                        runItem.summary ||
+                        (runItem.status === "failed"
+                          ? `执行失败：${runItem.error || "请检查模型配置"}`
+                          : isLiveTurn
+                            ? "正在自主循环思考与执行中..."
+                            : "已完成处理。");
+                      const ops = runItem.proposal?.operations || [];
+                      const imgOps = ops.filter((op) => op.result?.src);
+
+                      return (
+                        <div
+                          key={runItem.id}
+                          onClick={() => setActiveRun(runItem)}
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 8,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {/* User Bubble */}
+                          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                            <div
+                              style={{
+                                maxWidth: "82%",
+                                padding: "9px 13px",
+                                borderRadius: "14px 14px 4px 14px",
+                                background: "#18181b",
+                                color: "#fafafa",
+                                fontSize: 13,
+                                lineHeight: 1.5,
+                              }}
+                            >
+                              {runItem.goal}
+                            </div>
+                          </div>
+
+                          {/* Agent Response Card with Minimalist Collapsible Process */}
+                          <div
+                            style={{
+                              maxWidth: "92%",
+                              padding: "10px 13px",
+                              borderRadius: "4px 14px 14px 14px",
+                              background: "var(--bg-ivory-2)",
+                              border:
+                                activeRun?.id === runItem.id
+                                  ? "1px solid #18181b"
+                                  : "1px solid var(--border-hairline)",
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 8,
+                            }}
+                          >
+                            {/* Minimalist Collapsible Process Drawer */}
+                            {(stepsToRender.length > 0 || isLiveTurn) && (
+                              <div
+                                style={{
+                                  borderRadius: 10,
+                                  background: "var(--surface-solid)",
+                                  border: "1px solid var(--border-hairline)",
+                                  overflow: "hidden",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setExpandedRunIds((prev) => ({
+                                      ...prev,
+                                      [runItem.id]: !prev[runItem.id],
+                                    }));
+                                  }}
+                                  style={{
+                                    width: "100%",
+                                    padding: "6px 10px",
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    fontSize: 11.5,
+                                    color: "var(--text-secondary)",
+                                    fontWeight: 500,
+                                  }}
+                                >
+                                  <span>
+                                    {isExpanded ? "▾" : "▸"}{" "}
+                                    {isLiveTurn
+                                      ? `正在自主运行（第 ${stepsToRender.length} 步）...`
+                                      : `已完成 ${stepsToRender.length} 步思考与执行${
+                                          compactionCount > 0 ? ` · 自动压缩 ${compactionCount} 次` : ""
+                                        }`}
+                                  </span>
+                                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                                    {runItem.model_calls_used} calls
+                                  </span>
+                                </button>
+
+                                {isExpanded && stepsToRender.length > 0 && (
+                                  <div
+                                    style={{
+                                      borderTop: "1px solid var(--border-hairline)",
+                                      padding: "6px 10px",
+                                      display: "flex",
+                                      flexDirection: "column",
+                                      gap: 5,
+                                    }}
+                                  >
+                                    {stepsToRender.map((st) => {
+                                      const badge = actionBadge(st.action);
+                                      return (
+                                        <div
+                                          key={st.id}
+                                          style={{
+                                            display: "flex",
+                                            alignItems: "baseline",
+                                            gap: 6,
+                                            fontSize: 11.5,
+                                            lineHeight: 1.45,
+                                          }}
+                                        >
+                                          <span
+                                            style={{
+                                              flexShrink: 0,
+                                              fontSize: 10.5,
+                                              padding: "1px 6px",
+                                              borderRadius: 99,
+                                              background: badge.bg,
+                                              color: badge.color,
+                                              fontWeight: 600,
+                                            }}
+                                          >
+                                            {badge.text}
+                                          </span>
+                                          <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                                            {st.label}
+                                          </span>
+                                          {st.detail && (
+                                            <span
+                                              style={{
+                                                color: "var(--text-secondary)",
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                              }}
+                                              title={st.detail}
+                                            >
+                                              · {st.detail}
+                                            </span>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* First-person concise conversational reply */}
+                            <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text-primary)" }}>
+                              {replyText}
+                            </div>
+
+                            {/* Optional Canvas Edit Proposal Preview */}
+                            {ops.length > 0 && (
+                              <div
+                                style={{
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: 8,
+                                  paddingTop: 4,
+                                }}
+                              >
+                                {imgOps.length > 0 && (
+                                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                    {imgOps.map((op, i) => (
+                                      <img
+                                        key={`${op.result?.asset_id}-${i}`}
+                                        src={op.result?.src}
+                                        alt={op.result?.title || "generated"}
+                                        style={{
+                                          width: 112,
+                                          height: 84,
+                                          objectFit: "cover",
+                                          borderRadius: 8,
+                                          border: "1px solid var(--border-hairline)",
+                                        }}
+                                      />
+                                    ))}
+                                  </div>
+                                )}
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      padding: "2px 8px",
+                                      borderRadius: 99,
+                                      background: runItem.proposal?.verifier?.passed
+                                        ? "var(--emerald-soft)"
+                                        : "var(--danger-soft)",
+                                      color: runItem.proposal?.verifier?.passed
+                                        ? "#047857"
+                                        : "var(--danger)",
+                                    }}
+                                  >
+                                    {runItem.proposal?.verifier?.passed
+                                      ? `${ops.length} 项设计 · 0 碰撞`
+                                      : "检测到几何警告"}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="fc-btn fc-btn-sm fc-btn-obsidian"
+                                    disabled={Boolean(
+                                      runItem.proposal?.applied || runItem.proposal?.rejected,
+                                    )}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void handleApplyProposal(runItem);
+                                    }}
+                                  >
+                                    {runItem.proposal?.applied ? "已应用" : "应用到画布"}
+                                  </button>
+                                  {runItem.proposal?.applied && !runItem.proposal?.reverted && (
+                                    <button
+                                      type="button"
+                                      className="fc-btn fc-btn-sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleRevertProposal(runItem);
+                                      }}
+                                    >
+                                      撤回
+                                    </button>
+                                  )}
+                                  {!runItem.proposal?.applied && !runItem.proposal?.rejected && (
+                                    <button
+                                      type="button"
+                                      className="fc-btn fc-btn-sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleRejectProposal(runItem);
+                                      }}
+                                    >
+                                      否决
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                  <div ref={chatBottomRef} />
+                </div>
+
+                {/* Compact Debug Bar + Chat Input Composer */}
+                <div
+                  style={{
+                    borderTop: "1px solid var(--border-hairline)",
+                    paddingTop: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      fontSize: 11.5,
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    <select
+                      style={{ ...controlStyle, height: 28, fontSize: 11.5 }}
+                      value={llmMode}
+                      onChange={(e) => setLlmMode(e.target.value as "scripted" | "real")}
+                    >
+                      <option value="real">
+                        真实模型（{inspect?.active_model?.model_name || "需先配置"}）
+                      </option>
+                      <option value="scripted">脚本调试模式（免 Key）</option>
+                    </select>
+
+                    <select
+                      style={{ ...controlStyle, height: 28, fontSize: 11.5 }}
+                      value={compactionThresholdPct}
+                      onChange={(e) => setCompactionThresholdPct(Number(e.target.value))}
+                      title="自动压缩触发线"
+                    >
+                      <option value={5}>压缩线 5%（压测）</option>
+                      <option value={15}>压缩线 15%（短窗）</option>
+                      <option value={40}>压缩线 40%</option>
+                      <option value={65}>压缩线 65%（默认）</option>
+                    </select>
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={useMockImage}
+                        onChange={(e) => setUseMockImage(e.target.checked)}
+                      />
+                      Mock 生图
+                    </label>
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={forceCompact}
+                        onChange={(e) => setForceCompact(e.target.checked)}
+                      />
+                      强制预压缩
+                    </label>
+
+                    <button
+                      type="button"
+                      className="chip-btn"
+                      disabled={busy}
+                      onClick={() => {
+                        setLabScenario("memory_compaction");
+                        setCompactionThresholdPct(5);
+                        setLlmMode("scripted");
+                        void handleSendMessage(
+                          "测试多步循环上下文超阈值后自动压缩记忆，并保留云端摘要",
+                          "memory_compaction",
+                        );
+                      }}
+                    >
+                      ⚡ 一键测试满窗自动压缩
+                    </button>
+
+                    <button
+                      type="button"
+                      className="chip-btn"
+                      disabled={busy}
+                      onClick={() => {
+                        setLabScenario("collision_repair");
+                        setLlmMode("scripted");
+                        void handleSendMessage(
+                          "生成暖象牙极简主图并配右侧便签（自动检测碰撞并自修复）",
+                          "collision_repair",
+                        );
+                      }}
+                    >
+                      ↻ 测试碰撞自修复
+                    </button>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+                    <input
+                      style={{ ...controlStyle, height: 42, padding: "0 14px", fontSize: 13 }}
+                      value={goal}
+                      onChange={(e) => setGoal(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void handleSendMessage();
+                        }
+                      }}
+                      placeholder="像正常对话一样告诉 Agent 你想在画布上创作什么..."
+                    />
+                    <button
+                      type="button"
+                      className="fc-btn fc-btn-obsidian"
+                      disabled={busy || !selectedCanvasId || !activeSessionId || !goal.trim()}
+                      onClick={() => void handleSendMessage()}
+                      style={{ height: 42, padding: "0 20px" }}
+                    >
+                      {busy ? "循环执行中..." : "发送"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {/* Right Column: Context Window Compaction Meter + Cloud Session Memory + 2D Preview */}
+              <section style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className={`chip-btn ${rightTab === "context" ? "active" : ""}`}
+                    onClick={() => setRightTab("context")}
+                  >
+                    上下文与云端记忆 (/context)
+                  </button>
+                  <button
+                    type="button"
+                    className={`chip-btn ${rightTab === "layout" ? "active" : ""}`}
+                    onClick={() => setRightTab("layout")}
+                  >
+                    2D 排版校验
+                  </button>
+                  <button
+                    type="button"
+                    className={`chip-btn ${rightTab === "events" ? "active" : ""}`}
+                    onClick={() => setRightTab("events")}
+                  >
+                    SSE 流 ({events.length})
+                  </button>
+                </div>
+
+                {rightTab === "context" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <strong style={{ fontSize: 13.5 }}>实时上下文窗口 & 自动压缩线</strong>
+                        <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
+                          {tokenMeter.totalTok} / {tokenMeter.maxTok} tok ({tokenMeter.totalPct}%)
+                        </span>
+                      </div>
+
+                      {/* Segmented Bar + Dynamic Compaction Threshold Line */}
+                      <div style={{ position: "relative", paddingTop: 20, paddingBottom: 6 }}>
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: 2,
+                            left: `${compactionThresholdPct}%`,
+                            transform: "translateX(-50%)",
+                            fontSize: 10.5,
+                            color: "#b45309",
+                            fontWeight: 600,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          ▼ 压缩线 {compactionThresholdPct}% ({tokenMeter.thresholdTok} tok)
+                        </div>
+                        <div
+                          style={{
+                            height: 12,
+                            borderRadius: 99,
+                            background: "var(--bg-ivory-2)",
+                            overflow: "hidden",
+                            display: "flex",
+                          }}
+                        >
+                          <div style={{ width: `${tokenMeter.sysPct}%`, background: "#4f46e5" }} />
+                          <div style={{ width: `${tokenMeter.canvasPct}%`, background: "#d97706" }} />
+                          <div style={{ width: `${tokenMeter.corePct}%`, background: "#059669" }} />
+                          <div style={{ width: `${tokenMeter.recentPct}%`, background: "#0284c7" }} />
+                          <div style={{ width: `${tokenMeter.livePct}%`, background: "#7c3aed" }} />
+                        </div>
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: 17,
+                            bottom: 2,
+                            left: `${compactionThresholdPct}%`,
+                            width: 2,
+                            background: "#d97706",
+                            pointerEvents: "none",
+                          }}
+                        />
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11, color: "var(--text-secondary)" }}>
+                        <span><i style={{ color: "#4f46e5" }}>●</i> 系统 {tokenMeter.sysTok}</span>
+                        <span><i style={{ color: "#d97706" }}>●</i> 画布 {tokenMeter.canvasTok}</span>
+                        <span><i style={{ color: "#059669" }}>●</i> 云端记忆 {tokenMeter.coreTok}</span>
+                        <span><i style={{ color: "#0284c7" }}>●</i> 近期对话 {tokenMeter.recentTok}</span>
+                        <span><i style={{ color: "#7c3aed" }}>●</i> 当前循环 {tokenMeter.liveTok}</span>
+                      </div>
+                    </div>
+
+                    {tokenMeter.compactedInLoop && (
+                      <div
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          background: "var(--emerald-soft)",
+                          color: "#047857",
+                          fontSize: 12,
+                        }}
+                      >
+                        <strong>循环内自动压缩已触发：</strong>
+                        已自动蒸馏旧过程写入云端会话记忆
+                        {tokenMeter.compactedSaved > 0
+                          ? `，本次释放约 ${tokenMeter.compactedSaved} tokens`
+                          : ""}
+                        。
+                      </div>
+                    )}
+
+                    {/* Cloud Session Core Memory Box */}
+                    <div
+                      style={{
+                        borderRadius: 12,
+                        background: "var(--bg-ivory-2)",
+                        padding: 12,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                        fontSize: 12,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <strong>
+                          云端持久化记忆（{activeSession?.title || "当前 Agent"} · 已压缩{" "}
+                          {inspect?.memory.compacted_run_count || 0} 轮 · 未压缩{" "}
+                          {inspect?.recent_turns?.length || 0} 轮）
+                        </strong>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button type="button" className="fc-btn fc-btn-sm" onClick={handleCompactMemory}>
+                            手动压缩
+                          </button>
+                          <button type="button" className="fc-btn fc-btn-sm" onClick={handleResetSessionMemory}>
+                            重置记忆
+                          </button>
+                        </div>
+                      </div>
+                      <div style={{ color: "var(--text-secondary)", whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
+                        {inspect?.memory.compacted_summary ||
+                          "暂无云端摘要（当循环触及压缩线、手动点击压缩或「清空聊天并保留记忆」时自动沉淀）"}
+                      </div>
+                    </div>
+
+                    {inspect && (
+                      <pre
+                        style={{
+                          margin: 0,
+                          padding: 10,
+                          borderRadius: 10,
+                          background: "#18181b",
+                          color: "#f4f4f5",
+                          fontSize: 11,
+                          maxHeight: 230,
+                          overflow: "auto",
+                        }}
+                      >
+                        {JSON.stringify(
+                          {
+                            session_id: activeSessionId,
+                            live_context_snapshot: latestContextEvt?.data || null,
+                            recent_turns: inspect.recent_turns || [],
+                            canvas_brief_count: inspect.item_count,
+                          },
+                          null,
+                          2,
+                        )}
+                      </pre>
+                    )}
+                  </div>
+                )}
+
+                {rightTab === "layout" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div
+                      style={{
+                        borderRadius: 12,
+                        border: "1px solid var(--border-hairline)",
+                        background: "#FBF9F6",
+                        padding: 8,
+                      }}
+                    >
+                      <svg viewBox={svgViewBox} style={{ width: "100%", height: 280, display: "block" }}>
                         {previewBoxes.map((box) => {
                           const stroke =
                             box.kind === "collision"
@@ -888,172 +1396,16 @@ export function AgentLabPage() {
                           );
                         })}
                       </svg>
-                      <div style={{ display: "flex", gap: 14, fontSize: 11, color: "var(--text-secondary)", marginTop: 6 }}>
-                        <span>■ 灰褐：画布现有对象</span>
-                        <span style={{ color: "#2563eb" }}>┄ 蓝框：Agent 本轮提案对象</span>
-                        <span style={{ color: "#dc2626" }}>■ 红框：几何校验碰撞警告</span>
-                      </div>
                     </div>
-
-                    {activeRun?.error && (
-                      <div style={{ padding: "8px 10px", borderRadius: 10, background: "var(--danger-soft)", color: "var(--danger)", fontSize: 12 }}>
-                        <strong>失败诊断：</strong>
-                        {activeRun.error}
-                      </div>
-                    )}
-
-                    {activeRun?.proposal && (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                          <span
-                            style={{
-                              fontSize: 11.5,
-                              padding: "3px 10px",
-                              borderRadius: 99,
-                              background: activeRun.proposal.verifier?.passed
-                                ? "var(--emerald-soft)"
-                                : "var(--danger-soft)",
-                              color: activeRun.proposal.verifier?.passed
-                                ? "#047857"
-                                : "var(--danger)",
-                            }}
-                          >
-                            {activeRun.proposal.verifier?.passed
-                              ? "几何校验通过（0 碰撞）"
-                              : `几何校验发现 ${activeRun.proposal.verifier?.issue_count || 0} 处问题`}
-                          </span>
-                          <span
-                            style={{
-                              fontSize: 11.5,
-                              padding: "3px 10px",
-                              borderRadius: 99,
-                              background: "var(--surface-muted)",
-                              color: "var(--text-primary)",
-                            }}
-                          >
-                            闭环轮次：{activeRun.proposal.attempt_count || 1} 轮 · 模型调用{" "}
-                            {activeRun.model_calls_used}/{activeRun.model_call_budget}
-                          </span>
-                        </div>
-
-                        {activeRun.proposal.review?.feedback && (
-                          <div style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--bg-ivory-2)", padding: "8px 10px", borderRadius: 10 }}>
-                            <strong>Reviewer 结论：</strong>
-                            {activeRun.proposal.review.feedback}
-                          </div>
-                        )}
-
-                        {activeRun.proposal.operations.some((op) => op.result?.src) && (
-                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                            {activeRun.proposal.operations
-                              .filter((op) => op.result?.src)
-                              .map((op, i) => (
-                                <div
-                                  key={`${op.result?.asset_id}-${i}`}
-                                  style={{
-                                    width: 148,
-                                    borderRadius: 12,
-                                    overflow: "hidden",
-                                    border: "1px solid var(--border-hairline)",
-                                    background: "#fff",
-                                  }}
-                                >
-                                  <img
-                                    src={op.result?.src}
-                                    alt={op.result?.title || "generated"}
-                                    style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }}
-                                  />
-                                  <div style={{ padding: "6px 8px", fontSize: 11, color: "var(--text-secondary)" }}>
-                                    {op.result?.width}×{op.result?.height} · {op.tool}
-                                  </div>
-                                </div>
-                              ))}
-                          </div>
-                        )}
-
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button
-                            type="button"
-                            className="fc-btn fc-btn-sm fc-btn-obsidian"
-                            disabled={Boolean(activeRun.proposal.applied || activeRun.proposal.rejected)}
-                            onClick={handleApplyProposal}
-                          >
-                            应用提案到画布
-                          </button>
-                          <button
-                            type="button"
-                            className="fc-btn fc-btn-sm"
-                            disabled={!activeRun.proposal.applied || Boolean(activeRun.proposal.reverted)}
-                            onClick={handleRevertProposal}
-                          >
-                            整批撤回并记入反馈
-                          </button>
-                          <button
-                            type="button"
-                            className="fc-btn fc-btn-sm fc-btn-danger"
-                            disabled={Boolean(activeRun.proposal.applied || activeRun.proposal.rejected)}
-                            onClick={handleRejectProposal}
-                          >
-                            否决并写入避坑记忆
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {leftTab === "context" && inspect && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 12 }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8 }}>
-                      <div style={{ padding: 8, borderRadius: 10, background: "rgba(79,70,229,0.08)" }}>
-                        <div style={{ fontSize: 11, color: "#4338ca" }}>系统提示词</div>
-                        <strong>{tokenMeter.sysTok} tok</strong>
-                      </div>
-                      <div style={{ padding: 8, borderRadius: 10, background: "rgba(217,119,6,0.1)" }}>
-                        <div style={{ fontSize: 11, color: "#b45309" }}>画布对象 Brief</div>
-                        <strong>{tokenMeter.canvasTok} tok</strong>
-                      </div>
-                      <div style={{ padding: 8, borderRadius: 10, background: "rgba(5,150,105,0.1)" }}>
-                        <div style={{ fontSize: 11, color: "#047857" }}>Core Memory</div>
-                        <strong>{tokenMeter.coreTok} tok</strong>
-                      </div>
-                      <div style={{ padding: 8, borderRadius: 10, background: "rgba(2,132,199,0.1)" }}>
-                        <div style={{ fontSize: 11, color: "#0369a1" }}>近期轮次</div>
-                        <strong>{tokenMeter.recentTok} tok</strong>
-                      </div>
-                      <div style={{ padding: 8, borderRadius: 10, background: "rgba(124,58,237,0.1)" }}>
-                        <div style={{ fontSize: 11, color: "#6d28d9" }}>模型生成输出</div>
-                        <strong>{tokenMeter.liveTok} tok</strong>
-                      </div>
+                    <div style={{ display: "flex", gap: 12, fontSize: 11, color: "var(--text-secondary)" }}>
+                      <span>■ 灰褐：画布已有对象</span>
+                      <span style={{ color: "#2563eb" }}>┄ 蓝框：本轮提案对象</span>
+                      <span style={{ color: "#dc2626" }}>■ 红框：碰撞警告</span>
                     </div>
-
-                    <pre
-                      style={{
-                        margin: 0,
-                        padding: 12,
-                        borderRadius: 12,
-                        background: "#18181b",
-                        color: "#f4f4f5",
-                        fontSize: 11.5,
-                        maxHeight: 360,
-                        overflow: "auto",
-                      }}
-                    >
-                      {JSON.stringify(
-                        {
-                          live_context_snapshot: latestContextEvt?.data || null,
-                          canvas_brief: inspect.canvas_brief,
-                          harness_memory: inspect.memory,
-                          recent_turns: inspect.recent_turns || [],
-                        },
-                        null,
-                        2,
-                      )}
-                    </pre>
                   </div>
                 )}
 
-                {leftTab === "events" && (
+                {rightTab === "events" && (
                   <pre
                     style={{
                       margin: 0,
@@ -1062,221 +1414,15 @@ export function AgentLabPage() {
                       background: "#18181b",
                       color: "#e4e4e7",
                       fontSize: 11,
-                      maxHeight: 420,
+                      maxHeight: 400,
                       overflow: "auto",
                     }}
                   >
                     {events.length > 0
                       ? JSON.stringify(events, null, 2)
-                      : "暂无当前会话实时 SSE 流，点击「启动闭环运行」后这里将实时展示完整协议流。"}
+                      : "发送消息启动自主循环后，这里将展示实时 SSE 协议事件流。"}
                   </pre>
                 )}
-              </section>
-
-              {/* Right Pane: Context Bar + Live Persona State + Self-Correction Trace */}
-              <section style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                {/* Context Window & Compaction Line Meter (Claude Code /context style) */}
-                <div style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <div>
-                      <strong style={{ fontSize: 14.5 }}>上下文窗口与压缩管理</strong>
-                      <div style={{ fontSize: 11.5, color: "var(--text-secondary)", marginTop: 2 }}>
-                        总占用 <strong>{tokenMeter.totalTok}</strong> / {tokenMeter.maxTok} tokens（
-                        {tokenMeter.totalPct}%） · 自动压缩触发线{" "}
-                        <strong>
-                          {compactionThresholdPct}% ({tokenMeter.thresholdTok} tok)
-                        </strong>
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button type="button" className="fc-btn fc-btn-sm" onClick={handleCompactMemory}>
-                        手动压缩记忆
-                      </button>
-                      <button type="button" className="fc-btn fc-btn-sm" onClick={handleClearMemory}>
-                        清空记忆
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Segmented Bar + Vertical Compaction Line Marker */}
-                  <div style={{ position: "relative", paddingTop: 18, paddingBottom: 4 }}>
-                    <div
-                      style={{
-                        position: "absolute",
-                        top: 0,
-                        left: `${compactionThresholdPct}%`,
-                        transform: "translateX(-50%)",
-                        fontSize: 10.5,
-                        color: "#b45309",
-                        fontWeight: 600,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      ▼ 压缩线 {compactionThresholdPct}%
-                    </div>
-                    <div
-                      style={{
-                        height: 12,
-                        borderRadius: 99,
-                        background: "var(--bg-ivory-2)",
-                        overflow: "hidden",
-                        display: "flex",
-                        position: "relative",
-                      }}
-                    >
-                      <div style={{ width: `${tokenMeter.sysPct}%`, background: "#4f46e5" }} title={`系统提示 ~${tokenMeter.sysTok}`} />
-                      <div style={{ width: `${tokenMeter.canvasPct}%`, background: "#d97706" }} title={`画布 Brief ~${tokenMeter.canvasTok}`} />
-                      <div style={{ width: `${tokenMeter.corePct}%`, background: "#059669" }} title={`Core Memory ~${tokenMeter.coreTok}`} />
-                      <div style={{ width: `${tokenMeter.recentPct}%`, background: "#0284c7" }} title={`近期轮次 ~${tokenMeter.recentTok}`} />
-                      <div style={{ width: `${tokenMeter.livePct}%`, background: "#7c3aed" }} title={`输出累计 ~${tokenMeter.liveTok}`} />
-                    </div>
-                    <div
-                      style={{
-                        position: "absolute",
-                        top: 15,
-                        bottom: 0,
-                        left: `${compactionThresholdPct}%`,
-                        width: 2,
-                        background: "#d97706",
-                        pointerEvents: "none",
-                      }}
-                    />
-                  </div>
-
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11, color: "var(--text-secondary)" }}>
-                    <span><i style={{ color: "#4f46e5" }}>●</i> 系统 {tokenMeter.sysTok}</span>
-                    <span><i style={{ color: "#d97706" }}>●</i> 画布 {tokenMeter.canvasTok}</span>
-                    <span><i style={{ color: "#059669" }}>●</i> 记忆 {tokenMeter.coreTok}</span>
-                    <span><i style={{ color: "#0284c7" }}>●</i> 轮次 {tokenMeter.recentTok}</span>
-                    <span><i style={{ color: "#7c3aed" }}>●</i> 输出 {tokenMeter.liveTok}</span>
-                  </div>
-
-                  <div style={{ fontSize: 12, background: "var(--bg-ivory-2)", padding: "8px 10px", borderRadius: 10 }}>
-                    <strong>Core Memory（已压缩 {inspect?.memory.compacted_run_count || 0} 轮 · 未压缩 {inspect?.recent_turns?.length || 0} 轮）：</strong>
-                    <div style={{ marginTop: 4, color: "var(--text-secondary)", whiteSpace: "pre-wrap" }}>
-                      {inspect?.memory.compacted_summary || "尚无 Core Memory 摘要（可点击「手动压缩记忆」将已完成/失败轮次立即蒸馏写入）"}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Live Agent Persona State Matrix */}
-                <div style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <strong style={{ fontSize: 14.5 }}>Agent 多角色人物状态</strong>
-                    <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
-                      点击任意角色可下钻查看上下文交接与输出
-                    </span>
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
-                    {personaCards.map((p) => {
-                      const pill = statusPillStyle(p.status);
-                      const isSel = selectedPersona.key === p.key;
-                      return (
-                        <button
-                          key={p.key}
-                          type="button"
-                          onClick={() => setSelectedPersonaKey(p.key)}
-                          style={{
-                            textAlign: "left",
-                            padding: 10,
-                            borderRadius: 12,
-                            border: isSel ? "1.5px solid #111111" : "1px solid var(--border-hairline)",
-                            background: isSel ? "var(--bg-ivory-2)" : "var(--surface-solid)",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 4,
-                            cursor: "pointer",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
-                            <strong style={{ fontSize: 12.5 }}>{p.role}</strong>
-                            <span
-                              style={{
-                                fontSize: 10.5,
-                                padding: "2px 6px",
-                                borderRadius: 99,
-                                background: pill.bg,
-                                color: pill.color,
-                                fontWeight: 600,
-                              }}
-                            >
-                              {pill.label}
-                            </span>
-                          </div>
-                          <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>{p.subtitle}</div>
-                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {p.model}
-                            {p.completionTokens ? ` · ${p.completionTokens} tok` : ""}
-                            {p.durationMs ? ` · ${p.durationMs}ms` : ""}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {selectedPersona && (
-                    <div style={{ borderRadius: 12, background: "var(--bg-ivory-2)", padding: 10, fontSize: 12, display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <strong>
-                          {selectedPersona.role} · 人物当前状态详情
-                        </strong>
-                        <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                          {selectedPersona.promptTokens ? `输入 ~${selectedPersona.promptTokens} tok` : ""}
-                          {selectedPersona.completionTokens ? ` · 输出 ${selectedPersona.completionTokens} tok` : ""}
-                        </span>
-                      </div>
-                      <div style={{ color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                        {selectedPersona.detailText}
-                      </div>
-                      {Boolean(selectedPersona.rawPayload) && (
-                        <pre
-                          style={{
-                            margin: 0,
-                            padding: 8,
-                            borderRadius: 8,
-                            background: "#18181b",
-                            color: "#e4e4e7",
-                            fontSize: 11,
-                            maxHeight: 150,
-                            overflow: "auto",
-                          }}
-                        >
-                          {JSON.stringify(selectedPersona.rawPayload, null, 2)}
-                        </pre>
-                      )}
-                    </div>
-                  )}
-
-                  {activeRun?.proposal?.repair_history && activeRun.proposal.repair_history.length > 0 && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {activeRun.proposal.repair_history.map((round) => (
-                        <div
-                          key={round.round}
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            border: "1px solid var(--border-hairline)",
-                            background: round.approved
-                              ? "rgba(22, 163, 74, 0.08)"
-                              : "rgba(220, 38, 38, 0.07)",
-                            fontSize: 12,
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 600 }}>
-                            <span>第 {round.round} 轮 · {round.approved ? "审阅通过" : "驳回重修"}</span>
-                            <span>
-                              几何校验：{round.verifier_passed ? "通过" : `${round.issue_count} 个碰撞`}
-                            </span>
-                          </div>
-                          {round.feedback && (
-                            <div style={{ marginTop: 4, color: "var(--text-secondary)" }}>{round.feedback}</div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
               </section>
             </div>
           </>

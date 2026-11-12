@@ -46,6 +46,7 @@ from canvas_api.email_service import (
 from canvas_api.image_assets import persist_generated_images, resolve_user_image_provider
 from canvas_api.models import (
     AgentRun,
+    AgentSession,
     AgentTask,
     Asset,
     AuditEvent,
@@ -77,6 +78,8 @@ from canvas_api.providers.images import (
 from canvas_api.schemas import (
     AgentRunCreate,
     AgentRunOut,
+    AgentSessionCreate,
+    AgentSessionOut,
     AgentTaskOut,
     ApplyProposal,
     AssetOut,
@@ -89,6 +92,7 @@ from canvas_api.schemas import (
     CanvasSave,
     CanvasUpdate,
     CanvasVersionOut,
+    ClearChatRequest,
     EmailCodeRequest,
     FavoriteUpdate,
     GenerationRequest,
@@ -1776,6 +1780,7 @@ def _agent_run_out(run: AgentRun, tasks: list[AgentTask]) -> AgentRunOut:
     return AgentRunOut(
         id=run.id,
         canvas_id=run.canvas_id,
+        session_id=run.session_id,
         goal=run.goal,
         status=run.status.value if isinstance(run.status, RunStatus) else run.status,
         context_revision=run.context_revision,
@@ -1847,6 +1852,16 @@ async def create_agent_run(
     await _enforce_active_run_limit(
         session, user.id, request.app.state.settings.max_active_agent_runs_per_user
     )
+    if payload.session_id is not None:
+        agent_session = await session.scalar(
+            select(AgentSession).where(
+                AgentSession.id == payload.session_id,
+                AgentSession.owner_id == user.id,
+                AgentSession.canvas_id == canvas.id,
+            )
+        )
+        if agent_session is None:
+            raise not_found()
     asset_ids = set(payload.reference_asset_ids)
     if asset_ids:
         owned_ids = set(
@@ -1861,6 +1876,7 @@ async def create_agent_run(
         owner_id=user.id,
         project_id=canvas.project_id,
         canvas_id=canvas.id,
+        session_id=payload.session_id,
         goal=payload.goal.strip(),
         reference_asset_ids=[str(asset_id) for asset_id in payload.reference_asset_ids],
         generation_settings=(
@@ -1899,13 +1915,20 @@ async def create_agent_run(
                 return _agent_run_out(existing, tasks)
         raise
     is_generation = run.generation_settings is not None
+    loop_mode = (run.harness_options or {}).get("loop_mode")
+    if is_generation:
+        init_role, init_key, init_title = "Image Creator", "image_creator", "生成图片"
+    elif loop_mode == "autonomous":
+        init_role, init_key, init_title = "Lead Agent", "lead_agent", "理解对话并自主循环"
+    else:
+        init_role, init_key, init_title = "Coordinator", "coordinator", "拆解创作目标"
     tasks = [
         AgentTask(
             run_id=run.id,
-            role="Image Creator" if is_generation else "Coordinator",
+            role=init_role,
             sequence=0,
-            task_key="image_creator" if is_generation else "coordinator",
-            title="生成图片" if is_generation else "拆解创作目标",
+            task_key=init_key,
+            title=init_title,
             depends_on=[],
             status=RunStatus.QUEUED,
         )
@@ -1948,16 +1971,27 @@ async def create_agent_run(
 @router.get("/agent/runs", response_model=list[AgentRunOut])
 async def list_agent_runs(
     canvas_id: uuid.UUID,
+    session_id: uuid.UUID | None = None,
+    include_cleared: bool = False,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[AgentRunOut]:
     await _owned_canvas(session, user.id, canvas_id)
-    runs = await session.scalars(
-        select(AgentRun)
-        .where(AgentRun.owner_id == user.id, AgentRun.canvas_id == canvas_id)
-        .order_by(AgentRun.created_at.desc())
-        .limit(50)
-    )
+    stmt = select(AgentRun).where(AgentRun.owner_id == user.id, AgentRun.canvas_id == canvas_id)
+    if session_id is not None:
+        agent_session = await session.scalar(
+            select(AgentSession).where(
+                AgentSession.id == session_id,
+                AgentSession.owner_id == user.id,
+                AgentSession.canvas_id == canvas_id,
+            )
+        )
+        if agent_session is None:
+            raise not_found()
+        stmt = stmt.where(AgentRun.session_id == session_id)
+        if not include_cleared and agent_session.chat_cleared_at is not None:
+            stmt = stmt.where(AgentRun.created_at > agent_session.chat_cleared_at)
+    runs = await session.scalars(stmt.order_by(AgentRun.created_at.desc()).limit(50))
     output = []
     for run in runs:
         tasks = list(
@@ -2202,8 +2236,23 @@ async def retry_agent_run(
 
 
 async def _record_memory_rejection(
-    session: AsyncSession, owner_id: uuid.UUID, canvas_id: uuid.UUID, note: str
+    session: AsyncSession,
+    owner_id: uuid.UUID,
+    canvas_id: uuid.UUID,
+    note: str,
+    session_id: uuid.UUID | None = None,
 ) -> None:
+    if session_id is not None:
+        agent_session = await session.scalar(
+            select(AgentSession)
+            .where(AgentSession.id == session_id, AgentSession.owner_id == owner_id)
+            .with_for_update()
+        )
+        if agent_session is not None:
+            agent_session.rejected_feedback = [
+                *(agent_session.rejected_feedback or []),
+                note[:240],
+            ][-8:]
     memory = await session.scalar(
         select(CanvasMemory).where(
             CanvasMemory.owner_id == owner_id, CanvasMemory.canvas_id == canvas_id
@@ -2221,6 +2270,315 @@ async def _record_memory_rejection(
     else:
         feedback = [*(memory.rejected_feedback or []), note[:240]]
         memory.rejected_feedback = feedback[-8:]
+
+
+async def _distill_runs_summary(
+    *,
+    runs: list[AgentRun],
+    prev_summary: str,
+    rejected: list[str],
+    llm_mode: str,
+    cfg: ModelConfig | None,
+    settings: Settings,
+) -> str:
+    turn_lines = [
+        (
+            f"- [{r.status.value if isinstance(r.status, RunStatus) else r.status}] "
+            f"目标: {r.goal[:80]} | 结果: {(r.summary or r.error or '已完成')[:100]}"
+        )
+        for r in runs
+    ]
+    new_core = ""
+    if llm_mode == "real" and cfg is not None:
+        chat_provider = OpenAICompatibleChatProvider()
+        try:
+            compacted_res = await chat_provider.complete_json(
+                base_url=cfg.base_url,
+                api_key=decrypt_secret(cfg.encrypted_api_key, settings),
+                model=cfg.model_name,
+                system=(
+                    "你是 FlowCanvas Harness Memory Compactor。"
+                    "请把给定历史轮次与现有 core_memory 蒸馏为 400 字以内结构化中文核心记忆，"
+                    '仅返回 JSON：{"core_memory":"..."}。'
+                ),
+                user=json.dumps(
+                    {
+                        "previous_core_memory": prev_summary,
+                        "rejected_patterns": rejected,
+                        "turns": turn_lines,
+                    },
+                    ensure_ascii=False,
+                ),
+                max_output_tokens=800,
+                token_limit_field=settings.chat_completion_token_limit_field,
+            )
+            new_core = str(compacted_res.content.get("core_memory") or "").strip()
+        except ProviderError:
+            new_core = ""
+    if not new_core:
+        merged = [seg for seg in (prev_summary, *turn_lines) if seg]
+        if rejected:
+            merged.append("已否决方向：" + "；".join(rejected[-3:]))
+        new_core = "\n".join(merged)[-900:]
+    return new_core
+
+
+async def _agent_session_out(
+    session: AsyncSession, agent_session: AgentSession, max_tokens: int, threshold_pct: int = 65
+) -> AgentSessionOut:
+    stmt = select(AgentRun).where(
+        AgentRun.owner_id == agent_session.owner_id,
+        AgentRun.session_id == agent_session.id,
+        AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+    )
+    if agent_session.chat_cleared_at is not None:
+        stmt = stmt.where(AgentRun.created_at > agent_session.chat_cleared_at)
+    runs = list(await session.scalars(stmt.order_by(AgentRun.created_at.asc())))
+    anchor = agent_session.last_compacted_run_id
+    recent_runs = runs
+    if anchor:
+        idx = next((i for i, r in enumerate(runs) if r.id == anchor), -1)
+        if idx >= 0:
+            recent_runs = runs[idx + 1 :]
+    summary = agent_session.compacted_summary or ""
+    recent_chars = sum(len(r.goal) + len(r.summary or "") for r in recent_runs)
+    est_tokens = max(agent_session.estimated_tokens or 0, (len(summary) + recent_chars) // 3)
+    return AgentSessionOut(
+        id=agent_session.id,
+        canvas_id=agent_session.canvas_id,
+        title=agent_session.title,
+        compacted_summary=summary,
+        compacted_run_count=agent_session.compacted_run_count or 0,
+        recent_run_count=len(recent_runs),
+        estimated_tokens=est_tokens,
+        max_context_tokens=max_tokens,
+        compaction_threshold_tokens=int(max_tokens * (threshold_pct / 100.0)),
+        rejected_feedback=list(agent_session.rejected_feedback or []),
+        chat_cleared_at=_iso(agent_session.chat_cleared_at)
+        if agent_session.chat_cleared_at
+        else None,
+        created_at=_iso(agent_session.created_at),
+        updated_at=_iso(agent_session.updated_at),
+    )
+
+
+@router.get("/canvases/{canvas_id}/agent-sessions", response_model=list[AgentSessionOut])
+async def list_agent_sessions(
+    canvas_id: uuid.UUID,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[AgentSessionOut]:
+    await _owned_canvas(session, user.id, canvas_id)
+    cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
+    sessions = list(
+        await session.scalars(
+            select(AgentSession)
+            .where(AgentSession.owner_id == user.id, AgentSession.canvas_id == canvas_id)
+            .order_by(AgentSession.created_at.desc())
+        )
+    )
+    if not sessions:
+        default_session = AgentSession(
+            owner_id=user.id,
+            canvas_id=canvas_id,
+            title="主对话 Agent #1",
+        )
+        session.add(default_session)
+        await session.commit()
+        await session.refresh(default_session)
+        sessions = [default_session]
+    return [await _agent_session_out(session, s, max_tokens) for s in sessions]
+
+
+@router.post(
+    "/canvases/{canvas_id}/agent-sessions",
+    response_model=AgentSessionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_agent_session(
+    canvas_id: uuid.UUID,
+    payload: AgentSessionCreate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> AgentSessionOut:
+    await _owned_canvas(session, user.id, canvas_id)
+    existing_count = await session.scalar(
+        select(func.count(AgentSession.id)).where(
+            AgentSession.owner_id == user.id, AgentSession.canvas_id == canvas_id
+        )
+    )
+    title = (payload.title or "").strip() or f"独立 Agent #{(existing_count or 0) + 1}"
+    new_session = AgentSession(
+        owner_id=user.id,
+        canvas_id=canvas_id,
+        title=title,
+    )
+    session.add(new_session)
+    await session.commit()
+    await session.refresh(new_session)
+    cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
+    return await _agent_session_out(session, new_session, max_tokens)
+
+
+@router.post("/agent-sessions/{session_id}/clear-chat", response_model=AgentSessionOut)
+async def clear_agent_session_chat(
+    session_id: uuid.UUID,
+    payload: ClearChatRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> AgentSessionOut:
+    agent_session = await session.scalar(
+        select(AgentSession)
+        .where(AgentSession.id == session_id, AgentSession.owner_id == user.id)
+        .with_for_update()
+    )
+    if agent_session is None:
+        raise not_found()
+    cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
+
+    if payload.preserve_cloud_memory:
+        stmt = select(AgentRun).where(
+            AgentRun.owner_id == user.id,
+            AgentRun.session_id == agent_session.id,
+            AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+        )
+        if agent_session.chat_cleared_at is not None:
+            stmt = stmt.where(AgentRun.created_at > agent_session.chat_cleared_at)
+        runs = list(await session.scalars(stmt.order_by(AgentRun.created_at.asc())))
+        anchor = agent_session.last_compacted_run_id
+        uncompacted = runs
+        if anchor:
+            idx = next((i for i, r in enumerate(runs) if r.id == anchor), -1)
+            if idx >= 0:
+                uncompacted = runs[idx + 1 :]
+        if uncompacted:
+            new_core = await _distill_runs_summary(
+                runs=uncompacted,
+                prev_summary=agent_session.compacted_summary or "",
+                rejected=list(agent_session.rejected_feedback or []),
+                llm_mode=payload.llm_mode,
+                cfg=cfg,
+                settings=request.app.state.settings,
+            )
+            agent_session.compacted_summary = new_core
+            agent_session.compacted_run_count = (agent_session.compacted_run_count or 0) + len(
+                uncompacted
+            )
+            agent_session.last_compacted_run_id = uncompacted[-1].id
+            agent_session.estimated_tokens = len(new_core) // 3
+
+    agent_session.chat_cleared_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(agent_session)
+    return await _agent_session_out(session, agent_session, max_tokens)
+
+
+@router.post("/agent-sessions/{session_id}/memory/compact", response_model=AgentSessionOut)
+async def compact_session_memory_now(
+    session_id: uuid.UUID,
+    payload: MemoryCompactRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> AgentSessionOut:
+    agent_session = await session.scalar(
+        select(AgentSession)
+        .where(AgentSession.id == session_id, AgentSession.owner_id == user.id)
+        .with_for_update()
+    )
+    if agent_session is None:
+        raise not_found()
+    cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
+    stmt = select(AgentRun).where(
+        AgentRun.owner_id == user.id,
+        AgentRun.session_id == agent_session.id,
+        AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+    )
+    if agent_session.chat_cleared_at is not None:
+        stmt = stmt.where(AgentRun.created_at > agent_session.chat_cleared_at)
+    runs = list(await session.scalars(stmt.order_by(AgentRun.created_at.asc())))
+    anchor = agent_session.last_compacted_run_id
+    recent_runs = runs
+    if anchor:
+        idx = next((i for i, r in enumerate(runs) if r.id == anchor), -1)
+        if idx >= 0:
+            recent_runs = runs[idx + 1 :]
+    if recent_runs:
+        keep_tail = 1 if len(recent_runs) >= 2 else 0
+        to_compact = recent_runs[:-keep_tail] if keep_tail else recent_runs
+        tail_runs = recent_runs[-keep_tail:] if keep_tail else []
+        new_core = await _distill_runs_summary(
+            runs=to_compact,
+            prev_summary=agent_session.compacted_summary or "",
+            rejected=list(agent_session.rejected_feedback or []),
+            llm_mode=payload.llm_mode,
+            cfg=cfg,
+            settings=request.app.state.settings,
+        )
+        tail_chars = sum(len(r.goal) + len(r.summary or "") for r in tail_runs)
+        agent_session.compacted_summary = new_core
+        agent_session.compacted_run_count = (agent_session.compacted_run_count or 0) + len(
+            to_compact
+        )
+        agent_session.last_compacted_run_id = to_compact[-1].id
+        agent_session.estimated_tokens = (len(new_core) + tail_chars) // 3
+        await session.commit()
+        await session.refresh(agent_session)
+    return await _agent_session_out(session, agent_session, max_tokens)
+
+
+@router.delete("/agent-sessions/{session_id}/memory", response_model=AgentSessionOut)
+async def reset_session_memory(
+    session_id: uuid.UUID,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> AgentSessionOut:
+    agent_session = await session.scalar(
+        select(AgentSession)
+        .where(AgentSession.id == session_id, AgentSession.owner_id == user.id)
+        .with_for_update()
+    )
+    if agent_session is None:
+        raise not_found()
+    latest_run_id = await session.scalar(
+        select(AgentRun.id)
+        .where(AgentRun.owner_id == user.id, AgentRun.session_id == agent_session.id)
+        .order_by(AgentRun.created_at.desc())
+        .limit(1)
+    )
+    agent_session.compacted_summary = ""
+    agent_session.compacted_run_count = 0
+    agent_session.last_compacted_run_id = latest_run_id
+    agent_session.estimated_tokens = 0
+    agent_session.rejected_feedback = []
+    await session.commit()
+    await session.refresh(agent_session)
+    cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
+    return await _agent_session_out(session, agent_session, max_tokens)
+
+
+@router.delete("/agent-sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_agent_session(
+    session_id: uuid.UUID,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    agent_session = await session.scalar(
+        select(AgentSession).where(
+            AgentSession.id == session_id, AgentSession.owner_id == user.id
+        )
+    )
+    if agent_session is None:
+        raise not_found()
+    await session.delete(agent_session)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/canvases/{canvas_id}/memory", response_model=CanvasMemoryOut)
@@ -2337,26 +2695,67 @@ async def inspect_canvas_harness(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
 
     layout_report = verify_proposal_layout(items, validated_ops)
-    mem_out = await get_canvas_memory(canvas_id, user=user, session=session)
     cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
-    all_runs = list(
-        await session.scalars(
-            select(AgentRun)
-            .where(
-                AgentRun.owner_id == user.id,
-                AgentRun.canvas_id == canvas_id,
-                AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+    max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
+    threshold_pct = payload.compaction_threshold_pct or 65
+    agent_session: AgentSession | None = None
+    if payload.session_id is not None:
+        agent_session = await session.scalar(
+            select(AgentSession).where(
+                AgentSession.id == payload.session_id,
+                AgentSession.owner_id == user.id,
+                AgentSession.canvas_id == canvas_id,
             )
-            .order_by(AgentRun.created_at.desc())
-            .limit(12)
         )
-    )
-    memory_row = await session.scalar(
-        select(CanvasMemory).where(
-            CanvasMemory.owner_id == user.id, CanvasMemory.canvas_id == canvas_id
+        if agent_session is None:
+            raise not_found()
+        sess_out = await _agent_session_out(session, agent_session, max_tokens, threshold_pct)
+        mem_payload = {
+            "compacted_summary": sess_out.compacted_summary,
+            "compacted_run_count": sess_out.compacted_run_count,
+            "recent_run_count": sess_out.recent_run_count,
+            "estimated_tokens": sess_out.estimated_tokens,
+            "max_context_tokens": sess_out.max_context_tokens,
+            "compaction_threshold_tokens": sess_out.compaction_threshold_tokens,
+            "rejected_feedback": sess_out.rejected_feedback,
+        }
+        run_stmt = select(AgentRun).where(
+            AgentRun.owner_id == user.id,
+            AgentRun.canvas_id == canvas_id,
+            AgentRun.session_id == agent_session.id,
+            AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
         )
-    )
-    anchor = memory_row.last_compacted_run_id if memory_row else None
+        if agent_session.chat_cleared_at is not None:
+            run_stmt = run_stmt.where(AgentRun.created_at > agent_session.chat_cleared_at)
+        all_runs = list(
+            await session.scalars(run_stmt.order_by(AgentRun.created_at.desc()).limit(12))
+        )
+        anchor = agent_session.last_compacted_run_id
+    else:
+        mem_out = await get_canvas_memory(canvas_id, user=user, session=session)
+        mem_payload = {
+            **mem_out.model_dump(mode="json"),
+            "compaction_threshold_tokens": int(max_tokens * (threshold_pct / 100.0)),
+        }
+        all_runs = list(
+            await session.scalars(
+                select(AgentRun)
+                .where(
+                    AgentRun.owner_id == user.id,
+                    AgentRun.canvas_id == canvas_id,
+                    AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+                )
+                .order_by(AgentRun.created_at.desc())
+                .limit(12)
+            )
+        )
+        memory_row = await session.scalar(
+            select(CanvasMemory).where(
+                CanvasMemory.owner_id == user.id, CanvasMemory.canvas_id == canvas_id
+            )
+        )
+        anchor = memory_row.last_compacted_run_id if memory_row else None
+
     asc_runs = list(reversed(all_runs))
     if anchor:
         idx = next((i for i, r in enumerate(asc_runs) if r.id == anchor), -1)
@@ -2396,11 +2795,11 @@ async def inspect_canvas_harness(
         for r in asc_runs
     ]
     # Approximate token buckets aligned with Anthropic / Claude Code /context breakdown
-    system_prompts_tokens = 620
+    system_prompts_tokens = 520 if payload.session_id else 620
     brief_tokens = len(json.dumps(canvas_brief, ensure_ascii=False)) // 3
     core_memory_tokens = (
-        len(mem_out.compacted_summary)
-        + len(json.dumps(mem_out.rejected_feedback, ensure_ascii=False))
+        len(mem_payload["compacted_summary"])
+        + len(json.dumps(mem_payload["rejected_feedback"], ensure_ascii=False))
     ) // 3
     recent_turns_tokens = len(json.dumps(recent_turns_preview, ensure_ascii=False)) // 3
     latest_run = all_runs[0] if all_runs else None
@@ -2414,6 +2813,7 @@ async def inspect_canvas_harness(
     )
     return {
         "canvas_id": str(canvas.id),
+        "session_id": str(agent_session.id) if agent_session else None,
         "revision": canvas.revision,
         "item_count": len(items),
         "active_model": {
@@ -2421,7 +2821,7 @@ async def inspect_canvas_harness(
             "model_name": cfg.model_name if cfg else "scripted-harness",
             "base_url": cfg.base_url if cfg else "",
             "role_models": (cfg.role_models or {}) if cfg else {},
-            "max_context_tokens": mem_out.max_context_tokens,
+            "max_context_tokens": max_tokens,
         },
         "canvas_brief": canvas_brief,
         "recent_turns": recent_turns_preview,
@@ -2431,16 +2831,16 @@ async def inspect_canvas_harness(
             "core_memory_tokens": core_memory_tokens,
             "recent_turns_tokens": recent_turns_tokens,
             "live_run_tokens": live_run_tokens,
-            "memory_estimated_tokens": mem_out.estimated_tokens,
+            "memory_estimated_tokens": mem_payload["estimated_tokens"],
             "total_estimated_tokens": total_tokens,
-            "compaction_threshold_tokens": mem_out.compaction_threshold_tokens,
-            "max_context_tokens": mem_out.max_context_tokens,
+            "compaction_threshold_tokens": mem_payload["compaction_threshold_tokens"],
+            "max_context_tokens": max_tokens,
             "utilization_pct": round(
-                min(100.0, (total_tokens / max(1, mem_out.max_context_tokens)) * 100),
+                min(100.0, (total_tokens / max(1, max_tokens)) * 100),
                 1,
             ),
         },
-        "memory": mem_out.model_dump(mode="json"),
+        "memory": mem_payload,
         "layout_verification": layout_report,
     }
 
@@ -2739,6 +3139,7 @@ async def revert_agent_proposal(
         user.id,
         canvas.id,
         f"用户回退了指令「{run.goal[:40]}」的方案（{run.summary or '提案'}），勿重复采用。",
+        session_id=run.session_id,
     )
     await _append_event(
         session, run.id, "reverted", {"status": "succeeded", "canvas_revision": next_revision}
@@ -2772,6 +3173,7 @@ async def reject_agent_proposal(
             user.id,
             run.canvas_id,
             f"用户否决了指令「{run.goal[:40]}」的方案（{run.summary or '提案'}），请换方向。",
+            session_id=run.session_id,
         )
         await _audit_event(session, user.id, "agent_proposal.rejected", "agent_run", str(run.id))
         await _append_event(session, run.id, "rejected", {"status": "succeeded"})

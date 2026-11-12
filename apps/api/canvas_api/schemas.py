@@ -367,22 +367,52 @@ def _unique_reference_assets(value: list[uuid.UUID]) -> list[uuid.UUID]:
 class HarnessRunOptions(APIModel):
     use_mock_image: bool = False
     llm_mode: Literal["real", "scripted"] = "real"
+    loop_mode: Literal["autonomous", "pipeline"] = "autonomous"
     lab_scenario: Literal["normal", "collision_repair", "memory_compaction"] = "normal"
     force_compact: bool = False
     max_repair_rounds: int = Field(default=2, ge=0, le=3)
+    max_loop_steps: int = Field(default=10, ge=2, le=16)
     compaction_threshold_pct: int = Field(default=65, ge=5, le=90)
 
 
 class HarnessInspectRequest(APIModel):
     operations: list[dict] = Field(default_factory=list, max_length=12)
+    session_id: uuid.UUID | None = None
+    compaction_threshold_pct: int = Field(default=65, ge=5, le=90)
 
 
 class MemoryCompactRequest(APIModel):
     llm_mode: Literal["real", "scripted"] = "scripted"
 
 
+class AgentSessionCreate(APIModel):
+    title: str | None = Field(default=None, max_length=120)
+
+
+class ClearChatRequest(APIModel):
+    preserve_cloud_memory: bool = True
+    llm_mode: Literal["real", "scripted"] = "scripted"
+
+
+class AgentSessionOut(APIModel):
+    id: uuid.UUID
+    canvas_id: uuid.UUID
+    title: str
+    compacted_summary: str
+    compacted_run_count: int
+    recent_run_count: int
+    estimated_tokens: int
+    max_context_tokens: int
+    compaction_threshold_tokens: int
+    rejected_feedback: list[str]
+    chat_cleared_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
 class AgentRunCreate(APIModel):
     canvas_id: uuid.UUID
+    session_id: uuid.UUID | None = None
     goal: str = Field(min_length=1, max_length=4000)
     reference_asset_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
     generation_settings: ImageGenerationOptions | None = None
@@ -410,6 +440,7 @@ class AgentTaskOut(APIModel):
 class AgentRunOut(APIModel):
     id: uuid.UUID
     canvas_id: uuid.UUID
+    session_id: uuid.UUID | None = None
     goal: str
     status: str
     context_revision: int

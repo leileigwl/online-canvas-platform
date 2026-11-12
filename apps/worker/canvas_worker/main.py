@@ -14,6 +14,7 @@ from canvas_api.database import create_database
 from canvas_api.image_assets import persist_generated_images, resolve_user_image_provider
 from canvas_api.models import (
     AgentRun,
+    AgentSession,
     AgentTask,
     Asset,
     Canvas,
@@ -43,7 +44,52 @@ from langgraph.types import StreamWriter
 from sqlalchemy import and_, func, or_, select, update
 
 from canvas_worker.checkpoints import ensure_checkpointer_ready, open_checkpointer
-from canvas_worker.orchestration import AgentState, build_agent_graph
+from canvas_worker.orchestration import (
+    AgentState,
+    AutonomousAgentState,
+    build_agent_graph,
+    build_autonomous_graph,
+)
+
+AUTONOMOUS_LEAD_PROMPT = "\n".join(
+    (
+        (
+            "你是 FlowCanvas 的自主主创作 Agent。你直接与用户对话，"
+            "并在一个自由多步循环内按需决定思考、任务拆解、查看画布或执行设计。"
+        ),
+        "每轮只返回一个纯 JSON 对象，必须包含 action 字段，可选行动如下：",
+        '1. {"action":"think","label":"简短过程标签","thought":"1-3句自由思考推理"}',
+        (
+            '2. {"action":"plan","layout_note":"构图与安全坐标说明",'
+            '"tasks":["子步骤1","子步骤2"]}'
+        ),
+        '3. {"action":"inspect_canvas","reason":"查看画布对象与参考素材原因"}',
+        (
+            '4. {"action":"design_canvas","summary":"本轮操作概要",'
+            '"operations":[{"tool":"add_note","params":{...}}]}'
+        ),
+        '5. {"action":"respond","summary":"一句总结","reply":"面向用户的自然简洁中文回复"}',
+        (
+            "设计工具白名单：add_note(title,content,x,y,width,height)；"
+            "add_text(content,x,y,width,height,font_family,font_size,color)；"
+            "move_object(object_id,x,y)；resize_object(object_id,width,height)；"
+            "align_objects(object_ids,columns,gap)；"
+            "add_shape(shape_kind,title,x,y,width,height,color)；"
+            "generate_image(prompt,x,y,width,height,aspect_ratio,reference_object_ids)；"
+            "edit_image(prompt,reference_object_ids,x,y,width,height,aspect_ratio)。"
+        ),
+        (
+            "aspect_ratio 可选：auto,1:1,2:3,3:2,4:3,3:4,4:5,5:4,16:9,9:16,21:9,9:21。"
+            "新增视觉与卡片请优先从 layout_anchors.right_clear_x 起步，保留 >=32px 间距，"
+            "不要移动用户无关已有内容（如画笔涂鸦）。"
+        ),
+        (
+            "规则：简单问答可直接 respond；需要画布改动时调用 design_canvas，"
+            "系统会自动执行确定性几何碰撞校验并把结果返回到你下一轮循环中。"
+            "若校验失败，你必须再次调用 design_canvas 修正坐标后才可 respond。"
+        ),
+    )
+)
 
 COORDINATOR_PROMPT = "\n".join(
     (
@@ -167,17 +213,208 @@ def _scripted_model_response(*, system: str, user: str, lab_scenario: str) -> di
     payload = json.loads(user)
     if "Harness Memory Compactor" in system:
         turns = payload.get("turns_to_compact") or []
+        loop_steps = payload.get("loop_steps_to_compact") or []
         prev = str(payload.get("previous_core_memory") or "").strip()
         rejected = payload.get("rejected_patterns") or []
         summary_lines = [
             f"[{t.get('decision', 'proposed')}] {str(t.get('goal', ''))[:60]}"
             for t in turns[-6:]
         ]
+        if loop_steps:
+            summary_lines.extend(
+                f"[步骤:{s.get('action', 'step')}] {str(s.get('content', ''))[:60]}"
+                for s in loop_steps[-4:]
+            )
         if prev:
             summary_lines.insert(0, prev[:240])
         if rejected:
             summary_lines.append("规避否决模式: " + "; ".join(str(x)[:50] for x in rejected[-3:]))
         return {"core_memory": " | ".join(summary_lines)[:500] or "已完成历史对话压缩"}
+
+    if "自主主创作 Agent" in system:
+        goal = str(payload.get("goal") or "创意排版与生图")
+        step = int(payload.get("step") or 0)
+        canvas_items = payload.get("canvas") or []
+        anchors = payload.get("layout_anchors") or {}
+        base_x = float(anchors.get("right_clear_x") or -120.0)
+        suggested_y = float(anchors.get("suggested_y") or -120.0)
+        ref_ids = [
+            it["id"] for it in canvas_items if it.get("type") == "image" and it.get("id")
+        ][:1]
+        verifier_report = payload.get("verifier_report") or {}
+
+        if step == 0:
+            return {
+                "action": "think",
+                "label": "理解需求与检查上下文",
+                "thought": (
+                    f"先结合云端记忆与画布现状理解用户意图：「{goal[:80]}」，"
+                    f"确定新内容安全起笔坐标 x={base_x}。"
+                ),
+            }
+
+        if lab_scenario == "memory_compaction":
+            if step == 1:
+                return {
+                    "action": "plan",
+                    "layout_note": (
+                        f"从右侧安全位置 x={base_x} 起排列主图与便签，保留 >=32px 呼吸感"
+                    ),
+                    "tasks": ["分析历史记忆延续视觉语调", "右侧无碰撞排版视觉主图与设计说明"],
+                }
+            if step == 2:
+                return {
+                    "action": "inspect_canvas",
+                    "reason": "补充检查已有对象属性并触发多轮上下文累积观测",
+                }
+            if step == 3:
+                return {
+                    "action": "design_canvas",
+                    "summary": f"延续记忆生成并排布：{goal[:36]}",
+                    "operations": [
+                        {
+                            "tool": "edit_image" if ref_ids else "generate_image",
+                            "params": {
+                                "prompt": goal[:300],
+                                **({"reference_object_ids": ref_ids} if ref_ids else {}),
+                                "x": base_x,
+                                "y": suggested_y,
+                                "width": 240,
+                                "height": 320,
+                                "aspect_ratio": "3:4",
+                            },
+                        },
+                        {
+                            "tool": "add_note",
+                            "params": {
+                                "title": "延续设计说明",
+                                "content": f"响应需求：{goal[:80]}（已继承云端记忆并避开碰撞）",
+                                "x": round(base_x + 280, 1),
+                                "y": suggested_y,
+                                "width": 220,
+                                "height": 140,
+                            },
+                        },
+                    ],
+                }
+            return {
+                "action": "respond",
+                "summary": f"已按记忆上下文完成「{goal[:32]}」排布",
+                "reply": (
+                    "我已在循环过程中自动将较早上下文蒸馏写入云端记忆，"
+                    f"并在右侧安全区（x={base_x} 起）为你生成了视觉主图与设计说明卡（无重叠）。"
+                ),
+            }
+
+        if lab_scenario == "collision_repair":
+            if step == 1:
+                return {
+                    "action": "design_canvas",
+                    "summary": f"首轮探索布局：{goal[:30]}",
+                    "operations": [
+                        {
+                            "tool": "edit_image" if ref_ids else "generate_image",
+                            "params": {
+                                "prompt": goal[:300],
+                                **({"reference_object_ids": ref_ids} if ref_ids else {}),
+                                "x": 0,
+                                "y": -80,
+                                "width": 260,
+                                "height": 320,
+                                "aspect_ratio": "3:4",
+                            },
+                        },
+                        {
+                            "tool": "add_note",
+                            "params": {
+                                "title": "设计说明",
+                                "content": f"响应需求：{goal[:80]}",
+                                "x": 40,
+                                "y": -20,
+                                "width": 240,
+                                "height": 160,
+                            },
+                        },
+                    ],
+                }
+            if step == 2 and verifier_report.get("passed") is False:
+                return {
+                    "action": "design_canvas",
+                    "summary": f"已自动避让重排：{goal[:30]}",
+                    "operations": [
+                        {
+                            "tool": "edit_image" if ref_ids else "generate_image",
+                            "params": {
+                                "prompt": goal[:300],
+                                **({"reference_object_ids": ref_ids} if ref_ids else {}),
+                                "x": base_x,
+                                "y": suggested_y,
+                                "width": 240,
+                                "height": 320,
+                                "aspect_ratio": "3:4",
+                            },
+                        },
+                        {
+                            "tool": "add_note",
+                            "params": {
+                                "title": "设计说明",
+                                "content": f"响应需求：{goal[:80]}",
+                                "x": round(base_x + 280, 1),
+                                "y": suggested_y,
+                                "width": 220,
+                                "height": 140,
+                            },
+                        },
+                    ],
+                }
+            return {
+                "action": "respond",
+                "summary": f"完成碰撞自动修复并生成「{goal[:30]}」",
+                "reply": (
+                    "首轮检测到元素碰撞，我已根据确定性几何反馈在循环内自行将卡片移至右侧安全间距"
+                    f"（x={base_x} 与 x={round(base_x + 280, 1)}），现已通过校验。"
+                ),
+            }
+
+        # Default normal scenario in autonomous loop
+        if step == 1:
+            return {
+                "action": "design_canvas",
+                "summary": f"生成并排版：{goal[:36]}",
+                "operations": [
+                    {
+                        "tool": "edit_image" if ref_ids else "generate_image",
+                        "params": {
+                            "prompt": goal[:300],
+                            **({"reference_object_ids": ref_ids} if ref_ids else {}),
+                            "x": base_x,
+                            "y": suggested_y,
+                            "width": 240,
+                            "height": 320,
+                            "aspect_ratio": "3:4",
+                        },
+                    },
+                    {
+                        "tool": "add_note",
+                        "params": {
+                            "title": "设计说明",
+                            "content": f"围绕「{goal[:60]}」构图排版，留出 40px 间距。",
+                            "x": round(base_x + 280, 1),
+                            "y": suggested_y,
+                            "width": 220,
+                            "height": 140,
+                        },
+                    },
+                ],
+            }
+        return {
+            "action": "respond",
+            "summary": f"完成「{goal[:32]}」设计提案",
+            "reply": (
+                f"我已经围绕「{goal[:50]}」在画布右侧安全区域完成了图像生成与说明卡片排布，"
+                "并通过了无碰撞校验，你可以直接预览或一键应用到画布。"
+            ),
+        }
 
     if "FlowCanvas Coordinator" in system:
         goal = str(payload.get("goal") or "创意排版与生图")
@@ -836,11 +1073,21 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         await session.refresh(run)
         generation_settings = run.generation_settings
         harness_options = dict(run.harness_options or {})
+        session_uuid = run.session_id
         llm_mode = str(harness_options.get("llm_mode") or "real")
+        loop_mode = str(
+            harness_options.get("loop_mode")
+            or (
+                "autonomous"
+                if session_uuid is not None or "loop_mode" in harness_options
+                else "pipeline"
+            )
+        )
         use_mock_image = bool(harness_options.get("use_mock_image", False))
         lab_scenario = str(harness_options.get("lab_scenario") or "normal")
         force_compact = bool(harness_options.get("force_compact", False))
         max_repair_rounds = max(0, min(3, int(harness_options.get("max_repair_rounds", 2))))
+        max_loop_steps = max(2, min(16, int(harness_options.get("max_loop_steps", 10))))
         compaction_threshold_pct = max(
             5, min(90, int(harness_options.get("compaction_threshold_pct", 65)))
         )
@@ -944,33 +1191,53 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             "operations": ops_brief,
         }
 
-    # Build Harness persistent + compacted multi-turn memory for this canvas
+    # Build persistent + compacted multi-turn memory (isolated per AgentSession when set)
     async with session_factory() as mem_session:
-        memory = await mem_session.scalar(
-            select(CanvasMemory).where(
-                CanvasMemory.owner_id == owner_id, CanvasMemory.canvas_id == canvas_uuid
-            )
-        )
-        prior_runs = list(
-            await mem_session.scalars(
-                select(AgentRun)
-                .where(
-                    AgentRun.owner_id == owner_id,
-                    AgentRun.canvas_id == canvas_uuid,
-                    AgentRun.id != run_uuid,
-                    AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+        if session_uuid is not None:
+            session_mem = await mem_session.scalar(
+                select(AgentSession).where(
+                    AgentSession.id == session_uuid, AgentSession.owner_id == owner_id
                 )
-                .order_by(AgentRun.created_at.asc())
             )
-        )
-    anchor_id = memory.last_compacted_run_id if memory else None
+            run_stmt = select(AgentRun).where(
+                AgentRun.owner_id == owner_id,
+                AgentRun.session_id == session_uuid,
+                AgentRun.id != run_uuid,
+                AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+            )
+            if session_mem is not None and session_mem.chat_cleared_at is not None:
+                run_stmt = run_stmt.where(AgentRun.created_at > session_mem.chat_cleared_at)
+            prior_runs = list(
+                await mem_session.scalars(run_stmt.order_by(AgentRun.created_at.asc()))
+            )
+            memory_source = session_mem
+        else:
+            memory = await mem_session.scalar(
+                select(CanvasMemory).where(
+                    CanvasMemory.owner_id == owner_id, CanvasMemory.canvas_id == canvas_uuid
+                )
+            )
+            prior_runs = list(
+                await mem_session.scalars(
+                    select(AgentRun)
+                    .where(
+                        AgentRun.owner_id == owner_id,
+                        AgentRun.canvas_id == canvas_uuid,
+                        AgentRun.id != run_uuid,
+                        AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+                    )
+                    .order_by(AgentRun.created_at.asc())
+                )
+            )
+            memory_source = memory
+    anchor_id = memory_source.last_compacted_run_id if memory_source else None
     recent_runs = prior_runs
     if anchor_id:
         anchor_idx = next((idx for idx, item in enumerate(prior_runs) if item.id == anchor_id), -1)
         if anchor_idx >= 0:
             recent_runs = prior_runs[anchor_idx + 1 :]
-    compacted_summary = memory.compacted_summary if memory else ""
-    rejected_patterns = list(memory.rejected_feedback or []) if memory else []
+    compacted_summary = memory_source.compacted_summary if memory_source else ""
+    rejected_patterns = list(memory_source.rejected_feedback or []) if memory_source else []
     recent_payload = [_summarize_turn(r) for r in recent_runs]
     canvas_brief = _canvas_summary(canvas_items)
     visible_boxes = [
@@ -1162,7 +1429,14 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         content, _ = await call_model_with_meta(model=model, system=system, user=user)
         return content
 
-    def _emit_context_snapshot(writer: StreamWriter, *, phase: str, compacted: bool) -> None:
+    def _emit_context_snapshot(
+        writer: StreamWriter,
+        *,
+        phase: str,
+        compacted: bool,
+        live_loop_tokens: int = 0,
+        saved_tokens: int = 0,
+    ) -> None:
         current_core_tokens = (
             len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
         ) // 3
@@ -1171,7 +1445,11 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             // 3
         )
         total_tok = (
-            system_prompts_tokens + canvas_tokens + current_core_tokens + current_recent_tokens
+            system_prompts_tokens
+            + canvas_tokens
+            + current_core_tokens
+            + current_recent_tokens
+            + live_loop_tokens
         )
         writer(
             {
@@ -1179,22 +1457,22 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 "role": "Harness Context",
                 "phase": phase,
                 "compacted": compacted,
+                "compacted_saved_tokens": saved_tokens,
                 "title": (
                     f"上下文快照（{phase} · {total_tok}/{max_context_tokens} tokens）"
                 ),
                 "text": (
-                    f"系统提示 ~{system_prompts_tokens} · 画布对象 ~{canvas_tokens} · "
-                    f"核心记忆 ~{core_memory_tokens} · 近期轮次 ~{recent_turns_tokens} tok"
-                ).replace(
-                    f"核心记忆 ~{core_memory_tokens}", f"核心记忆 ~{current_core_tokens}"
-                ).replace(
-                    f"近期轮次 ~{recent_turns_tokens}", f"近期轮次 ~{current_recent_tokens}"
+                    f"系统 ~{system_prompts_tokens} · 画布 ~{canvas_tokens} · "
+                    f"云端记忆 ~{current_core_tokens} · 近期对话 ~{current_recent_tokens}"
+                    + (f" · 循环过程 ~{live_loop_tokens}" if live_loop_tokens else "")
+                    + " tok"
                 ),
                 "breakdown": {
                     "system_prompts_tokens": system_prompts_tokens,
                     "canvas_brief_tokens": canvas_tokens,
                     "core_memory_tokens": current_core_tokens,
                     "recent_turns_tokens": current_recent_tokens,
+                    "live_run_tokens": live_loop_tokens,
                     "total_estimated_tokens": total_tok,
                     "compaction_threshold_tokens": compact_threshold,
                     "compaction_threshold_pct": compaction_threshold_pct,
@@ -1203,6 +1481,52 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 "memory_preview": user_context["harness_memory"],
             }
         )
+
+    async def _save_compacted_row(
+        mem_save,
+        *,
+        new_summary: str,
+        compacted_delta: int,
+        last_run_id: uuid.UUID | None,
+        est_tokens: int,
+    ) -> None:
+        if session_uuid is not None:
+            sess_row = await mem_save.scalar(
+                select(AgentSession)
+                .where(AgentSession.id == session_uuid, AgentSession.owner_id == owner_id)
+                .with_for_update()
+            )
+            if sess_row is not None:
+                sess_row.compacted_summary = new_summary
+                sess_row.compacted_run_count = (
+                    sess_row.compacted_run_count or 0
+                ) + compacted_delta
+                if last_run_id is not None:
+                    sess_row.last_compacted_run_id = last_run_id
+                sess_row.estimated_tokens = est_tokens
+            return
+        row = await mem_save.scalar(
+            select(CanvasMemory)
+            .where(CanvasMemory.owner_id == owner_id, CanvasMemory.canvas_id == canvas_uuid)
+            .with_for_update()
+        )
+        if row is None:
+            row = CanvasMemory(
+                owner_id=owner_id,
+                canvas_id=canvas_uuid,
+                compacted_summary=new_summary,
+                compacted_run_count=compacted_delta,
+                last_compacted_run_id=last_run_id,
+                estimated_tokens=est_tokens,
+                rejected_feedback=rejected_patterns,
+            )
+            mem_save.add(row)
+        else:
+            row.compacted_summary = new_summary
+            row.compacted_run_count = (row.compacted_run_count or 0) + compacted_delta
+            if last_run_id is not None:
+                row.last_compacted_run_id = last_run_id
+            row.estimated_tokens = est_tokens
 
     async def _maybe_compact_harness_memory(writer: StreamWriter) -> None:
         nonlocal compacted_summary, approx_tokens
@@ -1264,27 +1588,13 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             + len(json.dumps(canvas_brief, ensure_ascii=False))
         ) // 3
         async with session_factory() as mem_save:
-            row = await mem_save.scalar(
-                select(CanvasMemory)
-                .where(CanvasMemory.owner_id == owner_id, CanvasMemory.canvas_id == canvas_uuid)
-                .with_for_update()
+            await _save_compacted_row(
+                mem_save,
+                new_summary=compacted_summary,
+                compacted_delta=len(head_runs),
+                last_run_id=head_runs[-1].id,
+                est_tokens=approx_tokens,
             )
-            if row is None:
-                row = CanvasMemory(
-                    owner_id=owner_id,
-                    canvas_id=canvas_uuid,
-                    compacted_summary=compacted_summary,
-                    compacted_run_count=len(head_runs),
-                    last_compacted_run_id=head_runs[-1].id,
-                    estimated_tokens=approx_tokens,
-                    rejected_feedback=rejected_patterns,
-                )
-                mem_save.add(row)
-            else:
-                row.compacted_summary = compacted_summary
-                row.compacted_run_count = (row.compacted_run_count or 0) + len(head_runs)
-                row.last_compacted_run_id = head_runs[-1].id
-                row.estimated_tokens = approx_tokens
             await mem_save.commit()
         user_context["harness_memory"] = {
             "core_summary": compacted_summary,
@@ -1701,6 +2011,591 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             "repair_history": next_history,
             "review": {**review_summary, "needs_repair": False},
         }
+
+    auto_totals = {"prompt_tokens": 0, "completion_tokens": 0, "duration_ms": 0}
+    auto_model_name = _model_for_role(model_config_data, "Lead Agent")
+
+    def _current_auto_tokens(loop_msgs: list[dict]) -> tuple[int, int, int, int]:
+        cur_core = (
+            len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
+        ) // 3
+        cur_recent = (
+            len(json.dumps(user_context["harness_memory"]["recent_turns"], ensure_ascii=False))
+            // 3
+        )
+        cur_loop = (len(json.dumps(loop_msgs, ensure_ascii=False)) // 3) + auto_totals[
+            "completion_tokens"
+        ]
+        total = system_prompts_tokens + canvas_tokens + cur_core + cur_recent + cur_loop
+        return cur_core, cur_recent, cur_loop, total
+
+    async def auto_lead_agent(state: AutonomousAgentState, writer: StreamWriter) -> dict:
+        nonlocal compacted_summary, recent_runs, approx_tokens
+        step = int(state.get("step") or 0)
+        cur_loop = list(state.get("loop_messages") or [])
+        cur_ops = list(state.get("operations") or [])
+        cur_verifier = state.get("verifier_report")
+        steps_log = list(state.get("steps_log") or [])
+        compaction_count = int(state.get("compaction_count") or 0)
+
+        if step == 0:
+            if not await set_task_state(0, RunStatus.RUNNING):
+                raise RunCanceled
+            _, _, init_loop_tok, _ = _current_auto_tokens(cur_loop)
+            _emit_context_snapshot(
+                writer,
+                phase="初始对话上下文",
+                compacted=False,
+                live_loop_tokens=init_loop_tok,
+            )
+
+        _, _, live_loop_tok, total_live = _current_auto_tokens(cur_loop)
+        has_compactable_turns = len(recent_runs) >= 1
+        has_compactable_loop = len(cur_loop) >= 2
+        should_compact = (
+            (total_live >= compact_threshold and (has_compactable_turns or has_compactable_loop))
+            or (step == 0 and force_compact and has_compactable_turns)
+            or (
+                lab_scenario == "memory_compaction"
+                and (has_compactable_turns or (len(cur_loop) >= 2 and compaction_count == 0))
+            )
+        )
+        if should_compact:
+            if step == 0 and len(recent_runs) > 2 and not force_compact:
+                turns_to_compact = recent_runs[:-1]
+                remaining_turns = recent_runs[-1:]
+            else:
+                turns_to_compact = list(recent_runs)
+                remaining_turns = []
+            keep_tail = 1 if len(cur_loop) <= 2 else 2
+            head_loop = cur_loop[:-keep_tail] if cur_loop else []
+            tail_loop = cur_loop[-keep_tail:] if cur_loop else []
+            writer(
+                {
+                    "kind": "thinking",
+                    "role": "Memory",
+                    "action": "compact",
+                    "title": f"自动压缩记忆（约 {total_live}/{compact_threshold} tok）",
+                    "text": (
+                        f"正在将 {len(turns_to_compact)} 轮历史与 {len(head_loop)} 步过程"
+                        "蒸馏同步到云端会话记忆..."
+                    ),
+                }
+            )
+            compacted_res = await call_model(
+                model=auto_model_name,
+                system=COMPACTOR_PROMPT,
+                user=json.dumps(
+                    {
+                        "previous_core_memory": compacted_summary,
+                        "rejected_patterns": rejected_patterns,
+                        "turns_to_compact": [_summarize_turn(r) for r in turns_to_compact],
+                        "loop_steps_to_compact": head_loop,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            new_core = str(compacted_res.get("core_memory") or compacted_summary).strip()[:1200]
+            compacted_summary = new_core
+            recent_runs = remaining_turns
+            tail_payload = [_summarize_turn(r) for r in remaining_turns]
+            user_context["harness_memory"] = {
+                "core_summary": compacted_summary,
+                "rejected_patterns": rejected_patterns,
+                "recent_turns": tail_payload,
+            }
+            cur_loop = (
+                [
+                    {
+                        "step": step,
+                        "role": "compactor",
+                        "action": "cloud_memory_sync",
+                        "content": f"[已自动蒸馏并同步至云端记忆] {compacted_summary[:220]}",
+                    },
+                    *tail_loop,
+                ]
+                if head_loop or tail_loop
+                else cur_loop
+            )
+            approx_tokens = (
+                len(compacted_summary)
+                + len(json.dumps(tail_payload, ensure_ascii=False))
+                + len(json.dumps(canvas_brief, ensure_ascii=False))
+            ) // 3
+            async with session_factory() as mem_save:
+                await _save_compacted_row(
+                    mem_save,
+                    new_summary=compacted_summary,
+                    compacted_delta=len(turns_to_compact) + (1 if head_loop else 0),
+                    last_run_id=turns_to_compact[-1].id if turns_to_compact else None,
+                    est_tokens=approx_tokens,
+                )
+                await mem_save.commit()
+            compaction_count += 1
+            _, _, post_loop_tok, post_total = _current_auto_tokens(cur_loop)
+            saved_tok = max(0, total_live - post_total)
+            steps_log.append(
+                {
+                    "step": step + 1,
+                    "action": "compact",
+                    "label": "自动压缩并保存云端记忆",
+                    "detail": (
+                        f"上下文从 {total_live} 降至 {post_total} tokens"
+                        f"（释放 {saved_tok} tok）"
+                    ),
+                }
+            )
+            _emit_context_snapshot(
+                writer,
+                phase=f"第 {compaction_count} 次自动压缩后",
+                compacted=True,
+                live_loop_tokens=post_loop_tok,
+                saved_tokens=saved_tok,
+            )
+
+        if step >= max_loop_steps:
+            fallback_reply = (
+                f"已完成 {step} 步自主探索与设计"
+                + ("，几何校验通过。" if (cur_verifier or {}).get("passed") else "。")
+            )
+            return {
+                "done": True,
+                "loop_messages": cur_loop,
+                "compaction_count": compaction_count,
+                "steps_log": steps_log,
+                "reply": fallback_reply,
+                "summary": state.get("summary") or f"完成「{goal[:32]}」",
+            }
+
+        lead_payload = {
+            **user_context,
+            "step": step,
+            "max_steps": max_loop_steps,
+            "loop_messages": cur_loop,
+            "current_operations": cur_ops,
+            "verifier_report": cur_verifier,
+        }
+        response, meta = await call_model_with_meta(
+            model=auto_model_name,
+            system=AUTONOMOUS_LEAD_PROMPT,
+            user=json.dumps(lead_payload, ensure_ascii=False),
+        )
+        auto_totals["prompt_tokens"] += int(meta.get("prompt_tokens") or 0)
+        auto_totals["completion_tokens"] += int(meta.get("completion_tokens") or 0)
+        auto_totals["duration_ms"] += int(meta.get("duration_ms") or 0)
+
+        action = str(response.get("action") or "").strip().lower()
+        if not action:
+            if response.get("operations"):
+                action = "design_canvas"
+            elif response.get("reply"):
+                action = "respond"
+            else:
+                action = "think"
+            response["action"] = action
+
+        if action == "respond":
+            if (
+                cur_ops
+                and cur_verifier is not None
+                and not cur_verifier.get("passed", True)
+                and int(state.get("repair_rounds_used") or 0) < max_repair_rounds
+                and step + 1 < max_loop_steps
+            ):
+                cur_loop.append(
+                    {
+                        "step": step + 1,
+                        "role": "verifier",
+                        "action": "repair_required",
+                        "content": (
+                            "系统拦截：当前画布操作存在几何碰撞或越界，请先调用 "
+                            "design_canvas 调整坐标后再回复用户。"
+                        ),
+                    }
+                )
+                return {
+                    "step": step + 1,
+                    "loop_messages": cur_loop,
+                    "compaction_count": compaction_count,
+                    "steps_log": steps_log,
+                    "pending_action": {
+                        "action": "think",
+                        "label": "准备修正坐标冲突",
+                        "thought": "根据校验结果重排",
+                    },
+                    "done": False,
+                }
+            final_reply = str(
+                response.get("reply") or response.get("summary") or f"已为你处理「{goal[:40]}」。"
+            ).strip()
+            final_summary = str(
+                response.get("summary") or state.get("summary") or final_reply[:80]
+            ).strip()
+            return {
+                "done": True,
+                "loop_messages": cur_loop,
+                "compaction_count": compaction_count,
+                "steps_log": steps_log,
+                "reply": final_reply,
+                "summary": final_summary,
+            }
+
+        return {
+            "step": step,
+            "loop_messages": cur_loop,
+            "compaction_count": compaction_count,
+            "steps_log": steps_log,
+            "pending_action": response,
+            "done": False,
+        }
+
+    async def auto_tool_executor(state: AutonomousAgentState, writer: StreamWriter) -> dict:
+        step = int(state.get("step") or 0)
+        pending = dict(state.get("pending_action") or {})
+        action = str(pending.get("action") or "think").strip().lower()
+        cur_loop = list(state.get("loop_messages") or [])
+        steps_log = list(state.get("steps_log") or [])
+        cur_ops = list(state.get("operations") or [])
+        cur_verifier = state.get("verifier_report")
+        cur_summary = str(state.get("summary") or "")
+        cur_repair_history = list(state.get("repair_history") or [])
+        repair_rounds_used = int(state.get("repair_rounds_used") or 0)
+
+        if action == "think":
+            label = str(pending.get("label") or "思考推理")[:60]
+            thought = str(pending.get("thought") or "梳理意图与构图策略。")[:500]
+            writer(
+                {
+                    "kind": "thinking",
+                    "role": "Lead Agent",
+                    "action": "think",
+                    "title": label,
+                    "text": thought,
+                }
+            )
+            cur_loop.append(
+                {"step": step + 1, "role": "assistant", "action": "think", "content": thought}
+            )
+            steps_log.append(
+                {"step": step + 1, "action": "think", "label": label, "detail": thought}
+            )
+
+        elif action == "plan":
+            layout_note = str(pending.get("layout_note") or "")[:300]
+            tasks = [str(t)[:120] for t in (pending.get("tasks") or [])[:4]]
+            plan_text = "；".join(tasks) + (f"（{layout_note}）" if layout_note else "")
+            writer(
+                {
+                    "kind": "thinking",
+                    "role": "Lead Agent",
+                    "action": "plan",
+                    "title": "按需拆解任务",
+                    "text": plan_text or layout_note,
+                }
+            )
+            cur_loop.append(
+                {
+                    "step": step + 1,
+                    "role": "assistant",
+                    "action": "plan",
+                    "content": {"tasks": tasks, "layout_note": layout_note},
+                }
+            )
+            steps_log.append(
+                {"step": step + 1, "action": "plan", "label": "任务拆解", "detail": plan_text}
+            )
+
+        elif action == "inspect_canvas":
+            reason = str(pending.get("reason") or "确认当前画布对象与空位")[:200]
+            right_x = layout_anchors["right_clear_x"]
+            writer(
+                {
+                    "kind": "thinking",
+                    "role": "Lead Agent",
+                    "action": "inspect_canvas",
+                    "title": "读取画布状态",
+                    "text": (
+                        f"{reason} · 当前共 {len(canvas_brief)} 个对象，右侧空位 x={right_x}"
+                    ),
+                }
+            )
+            cur_loop.append(
+                {
+                    "step": step + 1,
+                    "role": "tool",
+                    "action": "inspect_canvas",
+                    "content": {
+                        "reason": reason,
+                        "item_count": len(canvas_brief),
+                        "layout_anchors": layout_anchors,
+                        "items": canvas_brief[:16],
+                        "references": references,
+                    },
+                }
+            )
+            steps_log.append(
+                {
+                    "step": step + 1,
+                    "action": "inspect_canvas",
+                    "label": "查看画布上下文",
+                    "detail": f"共 {len(canvas_brief)} 个对象，右侧安全坐标 x={right_x}",
+                }
+            )
+
+        elif action == "design_canvas":
+            raw_ops = pending.get("operations") or []
+            cur_summary = str(
+                pending.get("summary") or cur_summary or f"设计更新：{goal[:36]}"
+            )[:240]
+            try:
+                validated_ops = validate_plan(raw_ops, canvas_items)
+            except PlanValidationError as error:
+                err_text = str(error)[:300]
+                writer(
+                    {
+                        "kind": "thinking",
+                        "role": "Lead Agent",
+                        "action": "design_error",
+                        "title": "工具参数校验未通过，准备自修复",
+                        "text": err_text,
+                    }
+                )
+                cur_loop.append(
+                    {
+                        "step": step + 1,
+                        "role": "tool",
+                        "action": "design_canvas_error",
+                        "content": f"工具参数校验失败：{err_text}。请修正字段与类型后重试。",
+                    }
+                )
+                steps_log.append(
+                    {
+                        "step": step + 1,
+                        "action": "repair",
+                        "label": "参数校验未通过",
+                        "detail": err_text,
+                    }
+                )
+            else:
+                materialized_ops: list[dict] = []
+                for op in validated_ops:
+                    if op["tool"] in {"generate_image", "edit_image"}:
+                        op = await materialize_image_op(op)
+                    materialized_ops.append(op)
+                    writer(
+                        {
+                            "kind": "tool_call",
+                            "tool": op["tool"],
+                            "label": TOOL_SPECS[op["tool"]].label,
+                            "params": op["params"],
+                            "status": "prepared",
+                            "result": op.get("result"),
+                        }
+                    )
+                report = verify_proposal_layout(canvas_items, materialized_ops)
+                summary_report = {k: v for k, v in report.items() if k != "preview_items"}
+                passed = bool(summary_report.get("passed", True))
+                issues = summary_report.get("issues") or []
+                cur_ops = materialized_ops
+                cur_verifier = summary_report
+                round_num = len(cur_repair_history) + 1
+                if round_num > 1 or not passed:
+                    repair_rounds_used += 1
+                issue_msg = "；".join(
+                    f"{it.get('message', '')} {it.get('suggestion', '')}".strip()
+                    for it in issues[:3]
+                )
+                cur_repair_history.append(
+                    {
+                        "round": round_num,
+                        "verifier_passed": passed,
+                        "issue_count": int(summary_report.get("issue_count", 0)),
+                        "approved": passed,
+                        "feedback": "无碰撞通过" if passed else issue_msg[:300],
+                    }
+                )
+                writer(
+                    {
+                        "kind": "verifier",
+                        "role": "Verifier",
+                        "attempt": round_num,
+                        "title": (
+                            f"第 {round_num} 次画布设计几何校验通过"
+                            if passed
+                            else f"第 {round_num} 次设计发现 {len(issues)} 项碰撞/边界问题"
+                        ),
+                        "text": "0 碰撞且在安全间距内。" if passed else issue_msg,
+                        **summary_report,
+                    }
+                )
+                hint = (
+                    "设计已通过几何校验，可直接调用 respond 回复用户。"
+                    if passed
+                    else (
+                        "检测到碰撞，请调整坐标（参考 "
+                        f"right_clear_x={layout_anchors['right_clear_x']}）后重试 design_canvas。"
+                    )
+                )
+                cur_loop.append(
+                    {
+                        "step": step + 1,
+                        "role": "tool",
+                        "action": "design_canvas_result",
+                        "content": {
+                            "operation_count": len(materialized_ops),
+                            "verifier_passed": passed,
+                            "issues": issues[:4],
+                            "hint": hint,
+                        },
+                    }
+                )
+                steps_log.append(
+                    {
+                        "step": step + 1,
+                        "action": "design_canvas",
+                        "label": f"画布设计（{len(materialized_ops)} 项操作）",
+                        "detail": (
+                            "几何校验通过（0 碰撞）" if passed else f"需修复：{issue_msg[:120]}"
+                        ),
+                    }
+                )
+
+        _, _, post_loop_tok, _ = _current_auto_tokens(cur_loop)
+        _emit_context_snapshot(
+            writer,
+            phase=f"第 {step + 1} 步执行后",
+            compacted=False,
+            live_loop_tokens=post_loop_tok,
+        )
+        return {
+            "step": step + 1,
+            "loop_messages": cur_loop,
+            "steps_log": steps_log,
+            "operations": cur_ops,
+            "verifier_report": cur_verifier,
+            "summary": cur_summary,
+            "repair_history": cur_repair_history,
+            "repair_rounds_used": repair_rounds_used,
+        }
+
+    if loop_mode == "autonomous":
+        auto_nodes = {
+            "lead_agent": auto_lead_agent,
+            "tool_executor": auto_tool_executor,
+        }
+        try:
+            auto_result: dict = {}
+            async with open_checkpointer(settings) as checkpointer:
+                graph = build_autonomous_graph(auto_nodes, checkpointer)
+                async for chunk in graph.astream(
+                    {
+                        "run_id": run_id,
+                        "goal": goal,
+                        "step": 0,
+                        "max_steps": max_loop_steps,
+                        "compaction_count": 0,
+                        "loop_messages": [],
+                        "operations": [],
+                        "repair_rounds_used": 0,
+                        "repair_history": [],
+                        "steps_log": [],
+                        "done": False,
+                    },
+                    {"configurable": {"thread_id": run_id}},
+                    stream_mode=["updates", "custom"],
+                    version="v2",
+                ):
+                    if chunk["type"] == "custom" and isinstance(chunk["data"], dict):
+                        payload_data = chunk["data"]
+                        evt_kind = str(payload_data.get("kind") or "thinking")
+                        async with task_state_lock:
+                            async with session_factory() as evt_session:
+                                await _append_event(evt_session, run_uuid, evt_kind, payload_data)
+                                await evt_session.commit()
+                    elif chunk["type"] == "updates" and isinstance(chunk["data"], dict):
+                        for node_patch in chunk["data"].values():
+                            if isinstance(node_patch, dict):
+                                auto_result.update(node_patch)
+            final_ops = list(auto_result.get("operations") or [])
+            final_verifier = auto_result.get("verifier_report") or (
+                verify_proposal_layout(canvas_items, final_ops)
+                if final_ops
+                else {"passed": True, "issue_count": 0, "issues": []}
+            )
+            final_repair_history = list(auto_result.get("repair_history") or [])
+            final_steps = list(auto_result.get("steps_log") or [])
+            final_reply = str(auto_result.get("reply") or f"已完成「{goal[:40]}」。").strip()
+            final_summary = str(auto_result.get("summary") or final_reply[:80]).strip()
+            lead_output = {
+                "reply": final_reply,
+                "summary": final_summary,
+                "steps": final_steps,
+                "compaction_count": int(auto_result.get("compaction_count") or 0),
+                "_meta": {
+                    "model": auto_model_name,
+                    "prompt_tokens": auto_totals["prompt_tokens"],
+                    "completion_tokens": auto_totals["completion_tokens"],
+                    "duration_ms": auto_totals["duration_ms"],
+                },
+            }
+            if not await set_task_state(0, RunStatus.SUCCEEDED, lead_output):
+                raise RunCanceled
+            proposal = {
+                "operations": final_ops,
+                "applied": False,
+                "reviewed": True,
+                "reply": final_reply,
+                "steps": final_steps,
+                "compaction_count": int(auto_result.get("compaction_count") or 0),
+                "review": {
+                    "approved": bool((final_verifier or {}).get("passed", True)),
+                    "passed_verifier": bool((final_verifier or {}).get("passed", True)),
+                    "attempt_count": len(final_repair_history) or (1 if final_ops else 0),
+                    "feedback": final_reply[:300],
+                },
+                "verifier": {
+                    k: v for k, v in (final_verifier or {}).items() if k != "preview_items"
+                },
+                "repair_history": final_repair_history,
+                "attempt_count": len(final_repair_history) or (1 if final_ops else 0),
+            }
+            async with session_factory() as session:
+                run = await session.get(AgentRun, run_uuid)
+                if run is None:
+                    return
+                completed = await session.execute(
+                    update(AgentRun)
+                    .where(AgentRun.id == run_uuid, AgentRun.status == RunStatus.RUNNING)
+                    .values(
+                        status=RunStatus.SUCCEEDED,
+                        summary=final_summary,
+                        proposal=proposal,
+                        error=None,
+                    )
+                )
+                if not completed.rowcount:
+                    return
+                await _append_event(
+                    session,
+                    run.id,
+                    "succeeded",
+                    {"status": "succeeded", "summary": final_summary, "proposal": proposal},
+                )
+                await session.commit()
+        except RunCanceled:
+            return
+        except (ProviderError, PlanValidationError, ValueError) as error:
+            await _fail_run_by_id(session_factory, run_uuid, str(error)[:500])
+        except Exception as error:
+            logger.error(
+                "autonomous agent loop failed run_id=%s error_type=%s",
+                run_id,
+                type(error).__name__,
+            )
+            await _fail_run_by_id(
+                session_factory, run_uuid, "Agent 执行失败，请检查模型配置后重试。"
+            )
+        return
 
     nodes = {
         "coordinator": coordinator,

@@ -1,67 +1,204 @@
-# FlowCanvas｜在线 AI 无限画布与视觉创作工作台
+<div align="center">
 
-> **AI 无限画布 + 文生图/参考图改图 + 多 Agent 协同排版全栈工作台（开源可自托管 Web 平台）**
+# FlowCanvas
 
-## AI 与开发工作入口
+**Open-Source, Self-Hosted AI Infinite Canvas & Multi-Agent Creative Studio**
 
-- **首先阅读**：[`AGENTS.md`](./AGENTS.md)（工作规则总入口）
-- **产品边界**：[`docs/PRODUCT.md`](./docs/PRODUCT.md)（上线范围、BYOK 模式与排除项）
-- **技术约束**：[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)（6 服务拓扑、技术栈、安全红线与禁止引入清单）
-- **交接清单**：[`docs/session-handoff.md`](./docs/session-handoff.md)（当前阶段、真实校验记录与下一步）
+*Infinite visual workspace · Multi-provider BYOK image generation & editing · LangGraph multi-agent SSE orchestration · Production security*
 
-## 详细设计文档
+[![License: MIT](https://img.shields.io/badge/License-MIT-111111?style=flat-square)](./LICENSE)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](./apps/api/pyproject.toml)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=flat-square&logo=fastapi&logoColor=white)](./apps/api)
+[![LangGraph](https://img.shields.io/badge/LangGraph-Multi--Agent-1C3C3C?style=flat-square)](./apps/worker)
+[![React 19](https://img.shields.io/badge/React-19-20232A?style=flat-square&logo=react&logoColor=61DAFB)](./apps/web)
+[![Docker Compose](https://img.shields.io/badge/Docker-6--Service%20Stack-2496ED?style=flat-square&logo=docker&logoColor=white)](./infra/compose.yaml)
 
-- [详细产品需求文档（PRD）](./docs/01-product/PRD.md)
-- [系统架构、目录树、表结构与接口契约](./docs/02-design/system-architecture.md)
-- [前端交互原型图目录](./docs/02-design/prototypes/README.md)
+**English** · [简体中文](./README.zh-CN.md) · [繁體中文](./README.zh-TW.md) · [日本語](./README.ja.md) · [한국어](./README.ko.md) · [Español](./README.es.md)
 
-## 核心特性
+<br />
 
-- **无限画布工作台**：基于 React 19 + TypeScript + Konva（独立拖拽层 `dragLayer`）的暖象牙画廊风无限空间，支持自由平移缩放、多选框选、文字 (`T`) 原位编辑、自由画笔 (`B`)、局部多选网格对齐、`Delete` 删除与撤销重做、IndexedDB 异步草稿恢复、右下角全局缩略图 Minimap 与 2x 无 UI 边框整画布 PNG 导出。
-- **AI 生图与参考图改图**：支持 OpenAI（`/images/generations` & `/images/edits` 最多 16 图）、阿里百炼（`qwen-image-2.0` 1–3 图融合，自动保持末图比例）与硅基流动（`Kolors`/`Qwen-Image`）三大适配器；按 0 / 1 / 2+ 张选中参考图动态呈现参数，完成后自动转存 MinIO 私有存储并落入画布。
-- **LangGraph 多角色 Agent 协作（SSE 实时流）**：Coordinator 拆解最多 3 个带依赖的子任务，Planner 制定视觉方案，独立 Canvas Editor 并发执行受限白名单工具（`add_note`、`add_text`、`move_object`、`resize_object`、`align_objects`、`add_shape`、`generate_image`、`edit_image`），通过 LangGraph `stream_mode=["updates", "custom"]` (`v2`) + SSE 向右栏实时输出 **Thinking 思考过程** 与 **工具调用卡片**，经 Reviewer 审核后由用户预览应用或整批撤销。
-- **BYOK 与生产级安全隔离**：用户独立配置并 Fernet 加密保存自己的 LLM 与 AI 生图密钥（绝不回显明文），服务端强制校验 HTTPS 公网地址防止 SSRF，所有项目、画布、素材与运行记录按账户严格隔离；新注册账号自动附带入门画布，并支持通过 CLI 一键预置面试演示画廊工作区。
+<img src="./docs/assets/canvas-workspace.png" alt="FlowCanvas Infinite Canvas and Multi-Agent Studio" width="100%" />
 
-## 本地开发命令（`uv` + `pnpm`）
+</div>
 
-```bash
-# 1. 启动基础设施（或使用完整 Compose 栈）
-cp .env.example .env
+---
 
-# 2. 安装 Python 工作区依赖（含 pytest）并执行数据库迁移
-uv sync --all-packages --extra dev
-cd apps/api && ../../.venv/bin/alembic upgrade head && cd ../..
+## Why FlowCanvas?
 
-# 3. 启动 FastAPI（:8001）与 ARQ Worker
-pnpm dev:api
-pnpm dev:worker
+Most AI image tools lock creators into a linear chat feed, while traditional whiteboards treat AI as a disconnected sidebar plugin. **FlowCanvas** unifies a tactile **Warm Ivory infinite canvas**, **multi-provider BYOK image generation**, and a **collaborative LangGraph multi-agent system** inside a self-hostable, security-hardened full-stack platform.
 
-# 4. 安装前端依赖并启动 Vite 开发服务（:5173）
-pnpm install
-pnpm dev
+- **Canvas-First Creation**: Pan, zoom, group-select, sketch (`B`), annotate (`T`), align grids, and drop reference images directly on an isolated Konva drag layer—click any canvas card to silently bind it as `Ref 1 / Ref 2` for image-to-image generation.
+- **Zero Lock-In (Multi-BYOK)**: Bring your own keys for **Google Gemini (Nano Banana)**, **OpenAI (`gpt-image-1` / `gpt-image-2.5` & gateways)**, **Alibaba DashScope (`qwen-image-2.0`)**, **Volcengine Ark (`Seedream`)**, and **SiliconFlow (`Kolors`)**, alongside any OpenAI-compatible reasoning LLM (`DeepSeek`, `OpenAI`, etc.).
+- **Observable Multi-Agent Execution**: Watch `Coordinator → Planner → Canvas Editor → Reviewer` think, plan, and call spatial/generation tools over **SSE v2** in real time, then preview changes on the canvas or undo an entire agent batch in one click.
+- **Ready for Production Self-Hosting**: Strict per-user tenant isolation, Fernet-encrypted API keys, DNS-pinned SSRF protection, Redis sliding-window rate limits, PostgreSQL row locks, and built-in SMTP OTP email verification.
 
-# 5. （可选）为面试演示账号一键预置示例图片与画廊画布
-uv run python -m canvas_api.seed_demo --username demo_creator --password '<your-password>'
+---
 
-# 6. 质量检查、单测与构建
-uv run ruff check apps/api apps/worker
-uv run pytest apps/api/tests apps/worker/tests -v
-pnpm typecheck
-pnpm build
+## Product Tour
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/studio-home.png" alt="Studio Home and Prompt Launcher" width="100%" />
+      <p align="center"><b>Studio Home & Quick Prompt Launcher</b><br /><sub>Launch straight into a blank infinite canvas or seed a project with reference images and model presets.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/canvas-workspace.png" alt="Infinite Canvas and Agent Sidebar" width="100%" />
+      <p align="center"><b>Infinite Canvas & Agent Collaboration</b><br /><sub>Warm Ivory gallery workspace with floating tools, Minimap, clean 2× PNG export, and live Harness memory sidebar.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/model-settings.png" alt="Multi-Provider BYOK Configuration" width="100%" />
+      <p align="center"><b>Multi-Provider BYOK Model Hub</b><br /><sub>Configure multiple named image endpoints + LLM reasoning models with Fernet encryption at rest.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/email-auth.png" alt="Email Verification Auth" width="100%" />
+      <p align="center"><b>Email OTP Auth & Session Security</b><br /><sub>6-digit email verification, username-or-email sign-in, password reset session revocation, and legacy email binding.</sub></p>
+    </td>
+  </tr>
+</table>
+
+---
+
+## Core Capabilities
+
+### 1. Infinite Canvas Workspace (`React 19` + `Konva`)
+- **Smooth Hardware-Isolated Rendering**: Dedicated `dragLayer` keeps drag-and-drop fluid without jitter or snap-back even on dense boards.
+- **Complete Creative Toolkit**: Select/marquee (`V`), hand pan (`H` / `Space`), inline canvas text (`T`) with zero-artifact cleanup, freehand brush (`B`), sticky notes, local multi-select grid alignment, `Delete` shortcut, snapshot version history, and **2× UI-free PNG export**.
+- **Resilient State**: IndexedDB asynchronous draft recovery + bottom-right interactive Minimap + optimistic revision control (`base_revision`).
+
+### 2. Multi-Provider Image Generation & Editing (`5` Adapters)
+
+| Provider Adapter | Supported Models & Highlights | Multi-Reference Capability |
+| :--- | :--- | :--- |
+| **Google Gemini / Nano Banana** | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `Imagen 4` | Native `:generateContent` inline fusion (up to 14 refs, 2K/4K) |
+| **OpenAI & Compatible** | `gpt-image-1`, `gpt-image-2.5` + chat-completions gateway fallback | `/images/generations` & `/images/edits` (up to 16 refs) |
+| **Alibaba DashScope** | `qwen-image-2.0` | 1–3 image fusion preserving target aspect ratio |
+| **Volcengine Ark** | `Seedream` series | Prompt-driven generation & multi-ref editing |
+| **SiliconFlow** | `Kolors`, `Qwen-Image` | Fast open-weights text-to-image & editing |
+
+- **Context-Aware Parameter Bar**: Dynamically adapts controls for `0` (text-to-image), `1`, or `2+` selected canvas reference images.
+- **Private Object Storage**: Generated artwork is automatically stored in private **MinIO / S3** and linked back onto the canvas without leaking external URLs.
+
+### 3. LangGraph Multi-Agent Orchestration & Harness Memory
+- **4-Role Pipeline**: `Coordinator` (decomposes into up to 3 dependency-linked subtasks) → `Planner` → `Canvas Editor` → `Reviewer`.
+- **8 Whitelisted Canvas Tools**: `add_note`, `add_text`, `move_object`, `resize_object`, `align_objects`, `add_shape`, `generate_image`, and `edit_image`—never exposing arbitrary code execution.
+- **SSE v2 Streaming**: Real-time **Thinking Trace** + **Tool Call Cards** streamed via LangGraph `stream_mode=["updates", "custom"]`.
+- **Harness Canvas Memory**: Persists long-running creative decisions per canvas (`canvas_memories`) and automatically summarizes/compacts context at **65% token budget**.
+
+### 4. Authentication & Production Security
+- **Email Verification Lifecycle**: SSL/STARTTLS SMTP OTP (`6-digit`, 10-min TTL, 60s resend cooldown, 5-attempt lockout, HMAC-SHA256 hashed in PostgreSQL), login via username or verified email, password reset revoking all active sessions, and `/account` verified email binding.
+- **Defense in Depth**: Fernet key encryption (write-only API keys, never echoed), HTTPS-only public-IP DNS pinning against SSRF, Redis sliding-window rate limits, MIME/magic-byte upload verification, and per-account resource ownership checks.
+
+---
+
+## System Architecture
+
+```mermaid
+flowchart LR
+  User["Browser (React 19 + Konva)"] -->|HTTP / SSE| Web["Caddy 2 Reverse Proxy (:8080)"]
+  Web -->|Static SPA| Dist["Vite Production Bundle"]
+  Web -->|/api/*| API["FastAPI Backend (:8000)"]
+
+  API -->|Async SQLAlchemy| PG[("PostgreSQL 18")]
+  API -->|Rate Limit / PubSub| Redis[("Redis 7")]
+  API -->|Private Assets| MinIO[("MinIO S3")]
+  API -->|Enqueue Run| Redis
+  API -->|OTP Mail| SMTP["SMTP SSL (:465)"]
+
+  Worker["ARQ Worker + LangGraph"] -->|Consume Jobs & Checkpoints| Redis
+  Worker -->|Persist State & Memory| PG
+  Worker -->|Store Generated Images| MinIO
+  Worker -->|BYOK HTTPS + DNS Pinning| Models["LLM & 5 Image Providers"]
 ```
 
-## 生产容器部署（Docker Compose + Caddy / 1Panel）
+---
+
+## Quick Start
+
+### Option A: Docker Compose (Recommended — Full 6-Service Stack)
+
+**Prerequisites**: Docker & Docker Compose (`Postgres`, `Redis`, `MinIO`, `API`, `ARQ Worker`, `Caddy Web`).
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/leileigwl/online-canvas-platform.git
+cd online-canvas-platform
+
+# 2. Create environment config and customize secrets / SMTP
 cp infra/compose.env.example .env
-# 修改 .env 中的强密钥、数据库口令与公网 DOMAIN（如 canvas.210214.xyz）
+# Edit .env: set strong APP_SECRET_KEY, DB/Redis/MinIO passwords, and optional SMTP_* keys
+
+# 3. Build and start all services
 docker compose --project-directory "$PWD" -f infra/compose.yaml --env-file .env up -d --build
+
+# 4. Verify container health
 docker compose --project-directory "$PWD" -f infra/compose.yaml --env-file .env ps
 ```
 
-- 备份与恢复见 [`infra/backup.sh`](./infra/backup.sh) 与 [`infra/restore.sh`](./infra/restore.sh)。
-- 若由宿主机 1Panel Nginx 终止 TLS 并反代至 Compose Caddy/Web 端口，需在 Nginx location 中关闭代理缓冲以保障 SSE 流式推送实时到达（详见 [`docs/02-design/system-architecture.md`](./docs/02-design/system-architecture.md)）。
+Open **http://localhost:8080** in your browser.
+> Backup and restore scripts are provided in [`infra/backup.sh`](./infra/backup.sh) and [`infra/restore.sh`](./infra/restore.sh).
+
+<details>
+<summary><b>Option B: Local Development Setup (<code>uv</code> + <code>pnpm</code>)</b></summary>
+
+```bash
+# 1. Copy local env template
+cp .env.example .env
+
+# 2. Install Python workspace dependencies & run Alembic migrations
+uv sync --all-packages --extra dev
+cd apps/api && ../../.venv/bin/alembic upgrade head && cd ../..
+
+# 3. Start FastAPI (:8001) and ARQ Worker
+pnpm dev:api
+pnpm dev:worker
+
+# 4. Install frontend dependencies & start Vite dev server (:5173)
+pnpm install
+pnpm dev
+
+# 5. (Optional) Seed a demo gallery account
+uv run python -m canvas_api.seed_demo --username demo_creator --password '<your-password>'
+
+# 6. Run linters, tests, typecheck & build
+uv run ruff check apps/api apps/worker
+uv run pytest apps/api/tests apps/worker/tests -v
+pnpm typecheck && pnpm build
+```
+
+</details>
+
+---
+
+## Project Structure
+
+```text
+online-canvas-platform/
+├── apps/
+│   ├── api/                 # FastAPI app, Alembic migrations, SMTP service, 5 image adapters, pytest suite
+│   ├── worker/              # ARQ background worker & LangGraph multi-agent orchestration + Harness memory
+│   └── web/                 # React 19 + Vite SPA (Studio Home, Konva Canvas, BYOK Settings, Auth Pages)
+├── packages/
+│   ├── api-client/          # Typed frontend API client
+│   └── canvas-core/         # Shared canvas document schemas & types
+├── infra/                   # Docker Compose topology, Caddyfile, MinIO init, backup & restore scripts
+└── docs/                    # PRD, system architecture, prototypes, and README visual assets
+```
+
+---
+
+## Documentation Index
+
+- [`AGENTS.md`](./AGENTS.md) — Engineering conventions & repository map
+- [`docs/PRODUCT.md`](./docs/PRODUCT.md) — Product scope, BYOK boundaries & roadmap
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — Service topology & security red lines
+- [`docs/01-product/PRD.md`](./docs/01-product/PRD.md) — Detailed product requirements
+- [`docs/02-design/system-architecture.md`](./docs/02-design/system-architecture.md) — Database schema, API contracts & reverse-proxy SSE guide
+
+---
 
 ## License
 
-本项目采用 [MIT License](./LICENSE) 开源。
+Released under the [MIT License](./LICENSE).

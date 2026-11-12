@@ -1,0 +1,1008 @@
+import {
+  api,
+  ApiError,
+  subscribeRunEvents,
+  type AgentRun,
+  type CanvasSnapshot,
+  type HarnessInspectResult,
+  type HarnessRunOptions,
+  type RunStreamEvent,
+  type User,
+} from "@canvas/api-client";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router";
+import { StudioHeader } from "../components/StudioHeader";
+
+type PreviewBox = {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  kind: "existing" | "proposed" | "collision";
+  src?: string;
+};
+
+function buildPreviewBoxes(
+  snapshot: CanvasSnapshot | null,
+  run: AgentRun | null,
+  inspect: HarnessInspectResult | null,
+): PreviewBox[] {
+  const existing = (snapshot?.document?.items || []) as Array<Record<string, unknown>>;
+  const collidingIds = new Set<string>();
+  const issues = run?.proposal?.verifier?.issues || inspect?.layout_verification?.issues || [];
+  for (const issue of issues) {
+    if (issue.code === "overlap") {
+      for (const oid of issue.object_ids || []) collidingIds.add(oid);
+    }
+  }
+
+  const boxes: PreviewBox[] = [];
+  for (const item of existing) {
+    const id = String(item.id || "");
+    if (!id || item.visible === false || item.type === "connector") continue;
+    boxes.push({
+      id,
+      label: String(item.title || item.content || item.type || id).slice(0, 18),
+      x: Number(item.x || 0),
+      y: Number(item.y || 0),
+      width: Math.max(24, Number(item.width || 160)),
+      height: Math.max(24, Number(item.height || 100)),
+      kind: collidingIds.has(id) ? "collision" : "existing",
+      src: typeof item.src === "string" ? item.src : undefined,
+    });
+  }
+
+  const ops = run?.proposal?.operations || [];
+  ops.forEach((op, idx) => {
+    const p = (op.params || {}) as Record<string, unknown>;
+    const simId = `sim-new-${idx}`;
+    if (op.tool === "move_object" && typeof p.object_id === "string") {
+      const target = boxes.find((b) => b.id === p.object_id);
+      if (target) {
+        target.x = Number(p.x ?? target.x);
+        target.y = Number(p.y ?? target.y);
+        target.kind = collidingIds.has(target.id) ? "collision" : "proposed";
+      }
+      return;
+    }
+    if (op.tool === "resize_object" && typeof p.object_id === "string") {
+      const target = boxes.find((b) => b.id === p.object_id);
+      if (target) {
+        target.width = Number(p.width ?? target.width);
+        target.height = Number(p.height ?? target.height);
+        target.kind = collidingIds.has(target.id) ? "collision" : "proposed";
+      }
+      return;
+    }
+    if (
+      op.tool === "generate_image" ||
+      op.tool === "edit_image" ||
+      op.tool === "add_note" ||
+      op.tool === "add_text" ||
+      op.tool === "add_shape"
+    ) {
+      boxes.push({
+        id: simId,
+        label: String(
+          op.result?.title || p.title || p.prompt || p.content || op.tool,
+        ).slice(0, 18),
+        x: Number(p.x || 0),
+        y: Number(p.y || 0),
+        width: Math.max(40, Number(p.width || 220)),
+        height: Math.max(32, Number(p.height || 140)),
+        kind: collidingIds.has(simId) ? "collision" : "proposed",
+        src: op.result?.src,
+      });
+    }
+  });
+  return boxes;
+}
+
+export function AgentLabPage() {
+  const navigate = useNavigate();
+  const { canvasId: routeCanvasId } = useParams();
+
+  const [user, setUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [canvases, setCanvases] = useState<CanvasSnapshot[]>([]);
+  const [selectedCanvasId, setSelectedCanvasId] = useState<string>(routeCanvasId || "");
+  const [snapshot, setSnapshot] = useState<CanvasSnapshot | null>(null);
+  const [inspect, setInspect] = useState<HarnessInspectResult | null>(null);
+
+  const [goal, setGoal] = useState("生成一张暖象牙极简香氛静物主图，并在右侧配一张无重叠的设计说明卡片");
+  const [llmMode, setLlmMode] = useState<"scripted" | "real">("scripted");
+  const [useMockImage, setUseMockImage] = useState(true);
+  const [labScenario, setLabScenario] = useState<
+    "normal" | "collision_repair" | "memory_compaction"
+  >("collision_repair");
+  const [forceCompact, setForceCompact] = useState(false);
+  const [maxRepairRounds, setMaxRepairRounds] = useState(2);
+
+  const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [events, setEvents] = useState<RunStreamEvent[]>([]);
+  const [leftTab, setLeftTab] = useState<"layout" | "data" | "events">("layout");
+  const [statusMsg, setStatusMsg] = useState<{ kind: "info" | "error"; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const unsubRef = useRef<(() => void) | null>(null);
+
+  const refreshCanvasState = useCallback(async (cid: string) => {
+    if (!cid) return;
+    const [snap, insp, hist] = await Promise.all([
+      api.getCanvas(cid),
+      api.inspectCanvasHarness(cid, []),
+      api.listAgentRuns(cid),
+    ]);
+    setSnapshot(snap);
+    setInspect(insp);
+    setRuns(hist);
+    if (hist.length > 0 && (!activeRun || activeRun.canvas_id !== cid)) {
+      setActiveRun(hist[0]);
+    }
+  }, [activeRun]);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const sess = await api.session();
+        if (!active) return;
+        if (!sess.user) {
+          setUser(null);
+          return;
+        }
+        setUser(sess.user);
+        const projects = await api.listProjects();
+        const allCanvases = (
+          await Promise.all(projects.map((p) => api.listCanvases(p.id)))
+        ).flat();
+        if (!active) return;
+        setCanvases(allCanvases);
+        const initialId =
+          routeCanvasId && allCanvases.some((c) => c.id === routeCanvasId)
+            ? routeCanvasId
+            : allCanvases[0]?.id || "";
+        setSelectedCanvasId(initialId);
+      } catch {
+        if (active) setUser(null);
+      } finally {
+        if (active) setAuthChecked(true);
+      }
+    })();
+    return () => {
+      active = false;
+      unsubRef.current?.();
+    };
+  }, [routeCanvasId]);
+
+  useEffect(() => {
+    if (!selectedCanvasId || !user) return;
+    void refreshCanvasState(selectedCanvasId);
+  }, [selectedCanvasId, user, refreshCanvasState]);
+
+  const subscribeToRun = useCallback(
+    (runId: string, cid: string) => {
+      unsubRef.current?.();
+      setEvents([]);
+      unsubRef.current = subscribeRunEvents(
+        runId,
+        async (evt) => {
+          setEvents((prev) =>
+            prev.some((p) => p.sequence === evt.sequence) ? prev : [...prev, evt],
+          );
+          if (evt.type === "succeeded" || evt.type === "failed" || evt.type === "canceled") {
+            const [latestRun, insp, hist, snap] = await Promise.all([
+              api.getAgentRun(runId),
+              api.inspectCanvasHarness(cid, []),
+              api.listAgentRuns(cid),
+              api.getCanvas(cid),
+            ]);
+            setActiveRun(latestRun);
+            setInspect(insp);
+            setRuns(hist);
+            setSnapshot(snap);
+            setBusy(false);
+          }
+        },
+        () => {
+          setBusy(false);
+        },
+      );
+    },
+    [],
+  );
+
+  const handleLaunchRun = async () => {
+    if (!selectedCanvasId || !goal.trim() || busy) return;
+    setStatusMsg(null);
+    setBusy(true);
+    try {
+      const harness_options: HarnessRunOptions = {
+        llm_mode: llmMode,
+        use_mock_image: useMockImage,
+        lab_scenario: labScenario,
+        force_compact: forceCompact,
+        max_repair_rounds: maxRepairRounds,
+      };
+      const created = await api.submitAgentGoal({
+        canvas_id: selectedCanvasId,
+        goal: goal.trim(),
+        reference_asset_ids: [],
+        harness_options,
+        idempotency_key: `lab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      setActiveRun(created);
+      if (created.status === "failed") {
+        setBusy(false);
+        setStatusMsg({ kind: "error", text: created.error || "Agent 运行失败" });
+        return;
+      }
+      subscribeToRun(created.id, selectedCanvasId);
+    } catch (err) {
+      setBusy(false);
+      setStatusMsg({
+        kind: "error",
+        text: err instanceof ApiError ? err.message : "启动实验运行失败",
+      });
+    }
+  };
+
+  const handleApplyProposal = async () => {
+    if (!activeRun || !snapshot) return;
+    try {
+      const updated = await api.applyProposal(activeRun.id, snapshot.revision);
+      setSnapshot(updated);
+      const [latestRun, insp] = await Promise.all([
+        api.getAgentRun(activeRun.id),
+        api.inspectCanvasHarness(selectedCanvasId, []),
+      ]);
+      setActiveRun(latestRun);
+      setInspect(insp);
+      setStatusMsg({ kind: "info", text: `提案已应用至真实画布（revision v${updated.revision}）` });
+    } catch (err) {
+      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "应用失败" });
+    }
+  };
+
+  const handleRevertProposal = async () => {
+    if (!activeRun || !snapshot) return;
+    try {
+      const reverted = await api.revertProposal(activeRun.id, snapshot.revision);
+      setSnapshot(reverted);
+      const [latestRun, insp] = await Promise.all([
+        api.getAgentRun(activeRun.id),
+        api.inspectCanvasHarness(selectedCanvasId, []),
+      ]);
+      setActiveRun(latestRun);
+      setInspect(insp);
+      setStatusMsg({
+        kind: "info",
+        text: "已整批撤回该提案，并将回退信号记录至 Harness 否决记忆。",
+      });
+    } catch (err) {
+      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "撤回失败" });
+    }
+  };
+
+  const handleRejectProposal = async () => {
+    if (!activeRun) return;
+    try {
+      const rejected = await api.rejectProposal(activeRun.id);
+      setActiveRun(rejected);
+      const insp = await api.inspectCanvasHarness(selectedCanvasId, []);
+      setInspect(insp);
+      setStatusMsg({ kind: "info", text: "已否决该提案并注入 Harness 避坑记忆。" });
+    } catch (err) {
+      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "否决失败" });
+    }
+  };
+
+  const handleCompactMemory = async () => {
+    if (!selectedCanvasId) return;
+    try {
+      await api.compactCanvasMemory(selectedCanvasId, llmMode);
+      const insp = await api.inspectCanvasHarness(selectedCanvasId, []);
+      setInspect(insp);
+      setStatusMsg({ kind: "info", text: "已手动执行 Harness 上下文压缩并更新摘要。" });
+    } catch (err) {
+      setStatusMsg({ kind: "error", text: err instanceof ApiError ? err.message : "压缩失败" });
+    }
+  };
+
+  const handleClearMemory = async () => {
+    if (!selectedCanvasId) return;
+    await api.clearCanvasMemory(selectedCanvasId);
+    const insp = await api.inspectCanvasHarness(selectedCanvasId, []);
+    setInspect(insp);
+    setStatusMsg({ kind: "info", text: "已清空当前画布的 Harness 记忆。" });
+  };
+
+  const handleCreateTestCanvas = async () => {
+    const projects = await api.listProjects();
+    const created = await api.createCanvas(
+      `Harness 测试画布 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
+      projects[0]?.id,
+    );
+    setCanvases((prev) => [created, ...prev]);
+    setSelectedCanvasId(created.id);
+    setActiveRun(null);
+    setEvents([]);
+  };
+
+  const previewBoxes = useMemo(
+    () => buildPreviewBoxes(snapshot, activeRun, inspect),
+    [snapshot, activeRun, inspect],
+  );
+
+  const svgViewBox = useMemo(() => {
+    if (previewBoxes.length === 0) return "-400 -280 800 560";
+    const minX = Math.min(...previewBoxes.map((b) => b.x)) - 60;
+    const minY = Math.min(...previewBoxes.map((b) => b.y)) - 60;
+    const maxX = Math.max(...previewBoxes.map((b) => b.x + b.width)) + 60;
+    const maxY = Math.max(...previewBoxes.map((b) => b.y + b.height)) + 60;
+    return `${minX} ${minY} ${Math.max(360, maxX - minX)} ${Math.max(240, maxY - minY)}`;
+  }, [previewBoxes]);
+
+  const cardStyle: React.CSSProperties = {
+    background: "var(--surface-solid)",
+    border: "1px solid var(--border-hairline)",
+    borderRadius: 18,
+    padding: 18,
+    boxShadow: "var(--shadow-card)",
+  };
+
+  const controlStyle: React.CSSProperties = {
+    height: 36,
+    padding: "0 10px",
+    borderRadius: 10,
+    border: "1px solid var(--border-hairline)",
+    background: "var(--surface-input)",
+    fontSize: 12.5,
+  };
+
+  return (
+    <div className="dotted-gallery-bg" style={{ minHeight: "100vh", paddingBottom: 56 }}>
+      <StudioHeader
+        active="lab"
+        user={user}
+        returnCanvasId={selectedCanvasId || null}
+        rightSlot={
+          selectedCanvasId ? (
+            <button
+              type="button"
+              className="fc-btn fc-btn-sm"
+              onClick={() => window.open(`/canvas/${selectedCanvasId}`, "_blank", "noopener")}
+            >
+              ↗ 新窗口打开画布对比
+            </button>
+          ) : null
+        }
+      />
+
+      <main style={{ width: "min(1320px, calc(100vw - 32px))", margin: "22px auto 0", display: "flex", flexDirection: "column", gap: 16 }}>
+        {!authChecked ? (
+          <div style={cardStyle}>正在初始化 Agent 实验室...</div>
+        ) : !user ? (
+          <div style={{ ...cardStyle, textAlign: "center", padding: 40 }}>
+            <h2 style={{ fontFamily: "var(--font-serif)", marginTop: 0 }}>请先登录使用 Harness & Agent 实验室</h2>
+            <button
+              type="button"
+              className="fc-btn fc-btn-obsidian"
+              onClick={() => navigate("/login?returnTo=/agent-lab")}
+            >
+              前往登录
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* Top Experiment Launcher */}
+            <section style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                <div>
+                  <h1 style={{ fontFamily: "var(--font-serif)", fontSize: 20, margin: "0 0 2px" }}>
+                    Harness & Agent 闭环实验室
+                  </h1>
+                  <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)" }}>
+                    独立设计、压测 LangGraph 自纠错闭环、几何碰撞校验、Mock 生图接口与 Harness 65% 上下文压缩，验证成熟后可平滑回迁主画布。
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <select
+                    style={controlStyle}
+                    value={selectedCanvasId}
+                    onChange={(e) => {
+                      setSelectedCanvasId(e.target.value);
+                      setActiveRun(null);
+                      setEvents([]);
+                    }}
+                  >
+                    {canvases.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} (v{c.revision})
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className="fc-btn fc-btn-sm" onClick={handleCreateTestCanvas}>
+                    + 新建测试画布
+                  </button>
+                </div>
+              </div>
+
+              {/* Scenario Presets */}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>预设联调剧本：</span>
+                <button
+                  type="button"
+                  className={`chip-btn ${labScenario === "collision_repair" ? "active" : ""}`}
+                  onClick={() => {
+                    setLabScenario("collision_repair");
+                    setLlmMode("scripted");
+                    setUseMockImage(true);
+                    setMaxRepairRounds(2);
+                    setGoal("生成一张暖象牙极简香氛主图并配右侧注释卡（故意触发第1轮重叠碰撞测试）");
+                  }}
+                >
+                  碰撞驳回自修复闭环（第1轮重叠 → Reviewer打回 → 第2轮自修复）
+                </button>
+                <button
+                  type="button"
+                  className={`chip-btn ${labScenario === "normal" && llmMode === "real" ? "active" : ""}`}
+                  onClick={() => {
+                    setLabScenario("normal");
+                    setLlmMode("real");
+                    setUseMockImage(true);
+                    setGoal("围绕当前画布设计一组品牌质感延伸图像，并补充说明便签与文字标题");
+                  }}
+                >
+                  真实 BYOK LLM + Mock 生图联调
+                </button>
+                <button
+                  type="button"
+                  className={`chip-btn ${labScenario === "memory_compaction" ? "active" : ""}`}
+                  onClick={() => {
+                    setLabScenario("memory_compaction");
+                    setLlmMode("scripted");
+                    setUseMockImage(true);
+                    setForceCompact(true);
+                    setGoal("延续前面已建立的视觉风格，新增一组材质研究图卡并蒸馏压缩记忆");
+                  }}
+                >
+                  Harness 记忆压缩联调
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
+                <input
+                  style={{ ...controlStyle, height: 42, padding: "0 14px", fontSize: 13 }}
+                  value={goal}
+                  onChange={(e) => setGoal(e.target.value)}
+                  placeholder="输入实验目标 prompt..."
+                />
+                <button
+                  type="button"
+                  className="fc-btn fc-btn-obsidian"
+                  disabled={busy || !selectedCanvasId}
+                  onClick={handleLaunchRun}
+                  style={{ height: 42, padding: "0 20px" }}
+                >
+                  {busy ? "Agent 闭环执行中..." : "▶ 启动闭环运行"}
+                </button>
+              </div>
+
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", fontSize: 12, color: "var(--text-secondary)" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  推理引擎：
+                  <select
+                    style={{ ...controlStyle, height: 30 }}
+                    value={llmMode}
+                    onChange={(e) => setLlmMode(e.target.value as "scripted" | "real")}
+                  >
+                    <option value="scripted">可控剧本模拟（免 LLM Key）</option>
+                    <option value="real">真实 BYOK LLM（读取「设置」）</option>
+                  </select>
+                </label>
+
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={useMockImage}
+                    onChange={(e) => setUseMockImage(e.target.checked)}
+                  />
+                  启用内置 Mock 生图适配器（免生图 Key，落盘真实 MinIO PNG）
+                </label>
+
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  最大自修复轮次：
+                  <select
+                    style={{ ...controlStyle, height: 30 }}
+                    value={maxRepairRounds}
+                    onChange={(e) => setMaxRepairRounds(Number(e.target.value))}
+                  >
+                    <option value={0}>0（禁用修复环）</option>
+                    <option value={1}>1 轮</option>
+                    <option value={2}>2 轮</option>
+                    <option value={3}>3 轮</option>
+                  </select>
+                </label>
+
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={forceCompact}
+                    onChange={(e) => setForceCompact(e.target.checked)}
+                  />
+                  运行时强制触发记忆压缩
+                </label>
+              </div>
+
+              {statusMsg && (
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 10,
+                    fontSize: 12.5,
+                    background:
+                      statusMsg.kind === "error" ? "var(--danger-soft)" : "var(--emerald-soft)",
+                    color: statusMsg.kind === "error" ? "var(--danger)" : "#047857",
+                  }}
+                >
+                  {statusMsg.text}
+                </div>
+              )}
+            </section>
+
+            {/* Dual-Pane Inspector */}
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.15fr) minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
+              {/* Left Pane: Visual Spatial Preview, Proposal Ops & Data Processing */}
+              <section style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      type="button"
+                      className={`chip-btn ${leftTab === "layout" ? "active" : ""}`}
+                      onClick={() => setLeftTab("layout")}
+                    >
+                      2D 排版与碰撞透视
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip-btn ${leftTab === "data" ? "active" : ""}`}
+                      onClick={() => setLeftTab("data")}
+                    >
+                      数据处理 & Token 账本
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip-btn ${leftTab === "events" ? "active" : ""}`}
+                      onClick={() => setLeftTab("events")}
+                    >
+                      SSE 事件流 ({events.length})
+                    </button>
+                  </div>
+                  {runs.length > 0 && (
+                    <select
+                      style={{ ...controlStyle, height: 30, maxWidth: 230 }}
+                      value={activeRun?.id || ""}
+                      onChange={(e) => {
+                        const found = runs.find((r) => r.id === e.target.value) || null;
+                        setActiveRun(found);
+                      }}
+                    >
+                      {runs.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          [{r.status}] {r.goal.slice(0, 22)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                {leftTab === "layout" && (
+                  <>
+                    <div
+                      style={{
+                        borderRadius: 14,
+                        border: "1px solid var(--border-hairline)",
+                        background: "#FBF9F6",
+                        padding: 10,
+                      }}
+                    >
+                      <svg
+                        viewBox={svgViewBox}
+                        style={{ width: "100%", height: 290, display: "block" }}
+                      >
+                        {previewBoxes.map((box) => {
+                          const stroke =
+                            box.kind === "collision"
+                              ? "#dc2626"
+                              : box.kind === "proposed"
+                                ? "#2563eb"
+                                : "#78716c";
+                          const fill =
+                            box.kind === "collision"
+                              ? "rgba(220, 38, 38, 0.14)"
+                              : box.kind === "proposed"
+                                ? "rgba(37, 99, 235, 0.10)"
+                                : "rgba(231, 226, 216, 0.72)";
+                          return (
+                            <g key={box.id}>
+                              <rect
+                                x={box.x}
+                                y={box.y}
+                                width={box.width}
+                                height={box.height}
+                                rx={10}
+                                fill={fill}
+                                stroke={stroke}
+                                strokeWidth={3}
+                                strokeDasharray={box.kind === "proposed" ? "8 5" : undefined}
+                              />
+                              <text
+                                x={box.x + 10}
+                                y={box.y + 24}
+                                fontSize={14}
+                                fill="#1c1917"
+                              >
+                                {box.label}
+                              </text>
+                              <text
+                                x={box.x + 10}
+                                y={box.y + 44}
+                                fontSize={11}
+                                fill="#57534e"
+                              >
+                                {`${Math.round(box.x)},${Math.round(box.y)} (${Math.round(box.width)}×${Math.round(box.height)})`}
+                              </text>
+                            </g>
+                          );
+                        })}
+                      </svg>
+                      <div style={{ display: "flex", gap: 14, fontSize: 11, color: "var(--text-secondary)", marginTop: 6 }}>
+                        <span>■ 灰褐：画布现有对象</span>
+                        <span style={{ color: "#2563eb" }}>┄ 蓝框：Agent 本轮提案对象</span>
+                        <span style={{ color: "#dc2626" }}>■ 红框：几何校验碰撞警告</span>
+                      </div>
+                    </div>
+
+                    {/* Verifier + Reviewer Summary */}
+                    {activeRun?.proposal && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                          <span
+                            style={{
+                              fontSize: 11.5,
+                              padding: "3px 10px",
+                              borderRadius: 99,
+                              background: activeRun.proposal.verifier?.passed
+                                ? "var(--emerald-soft)"
+                                : "var(--danger-soft)",
+                              color: activeRun.proposal.verifier?.passed
+                                ? "#047857"
+                                : "var(--danger)",
+                            }}
+                          >
+                            {activeRun.proposal.verifier?.passed
+                              ? "几何校验通过（0 碰撞）"
+                              : `几何校验发现 ${activeRun.proposal.verifier?.issue_count || 0} 处问题`}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 11.5,
+                              padding: "3px 10px",
+                              borderRadius: 99,
+                              background: "var(--surface-muted)",
+                              color: "var(--text-primary)",
+                            }}
+                          >
+                            闭环轮次：{activeRun.proposal.attempt_count || 1} 轮 · 调用{" "}
+                            {activeRun.model_calls_used}/{activeRun.model_call_budget}
+                          </span>
+                          {activeRun.proposal.applied && (
+                            <span style={{ fontSize: 11.5, color: "#047857" }}>已应用到画布</span>
+                          )}
+                          {activeRun.proposal.rejected && (
+                            <span style={{ fontSize: 11.5, color: "var(--danger)" }}>已否决并写入避坑记忆</span>
+                          )}
+                        </div>
+
+                        {activeRun.proposal.review?.feedback && (
+                          <div style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--bg-ivory-2)", padding: "8px 10px", borderRadius: 10 }}>
+                            <strong>Reviewer 结论：</strong>
+                            {activeRun.proposal.review.feedback}
+                          </div>
+                        )}
+
+                        {/* Generated Mock / Real Assets Preview */}
+                        {activeRun.proposal.operations.some((op) => op.result?.src) && (
+                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                            {activeRun.proposal.operations
+                              .filter((op) => op.result?.src)
+                              .map((op, i) => (
+                                <div
+                                  key={`${op.result?.asset_id}-${i}`}
+                                  style={{
+                                    width: 148,
+                                    borderRadius: 12,
+                                    overflow: "hidden",
+                                    border: "1px solid var(--border-hairline)",
+                                    background: "#fff",
+                                  }}
+                                >
+                                  <img
+                                    src={op.result?.src}
+                                    alt={op.result?.title || "generated"}
+                                    style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }}
+                                  />
+                                  <div style={{ padding: "6px 8px", fontSize: 11, color: "var(--text-secondary)" }}>
+                                    {op.result?.width}×{op.result?.height} · {op.tool}
+                                  </div>
+                                </div>
+                              ))}
+                          </div>
+                        )}
+
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="fc-btn fc-btn-sm fc-btn-obsidian"
+                            disabled={Boolean(activeRun.proposal.applied || activeRun.proposal.rejected)}
+                            onClick={handleApplyProposal}
+                          >
+                            应用提案到画布
+                          </button>
+                          <button
+                            type="button"
+                            className="fc-btn fc-btn-sm"
+                            disabled={!activeRun.proposal.applied || Boolean(activeRun.proposal.reverted)}
+                            onClick={handleRevertProposal}
+                          >
+                            整批撤回并记入反馈
+                          </button>
+                          <button
+                            type="button"
+                            className="fc-btn fc-btn-sm fc-btn-danger"
+                            disabled={Boolean(activeRun.proposal.applied || activeRun.proposal.rejected)}
+                            onClick={handleRejectProposal}
+                          >
+                            否决并写入避坑记忆
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {leftTab === "data" && inspect && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 12 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                      <div style={{ padding: 10, borderRadius: 10, background: "var(--bg-ivory-2)" }}>
+                        <div style={{ color: "var(--text-secondary)", fontSize: 11 }}>画布压缩摘要估算</div>
+                        <strong>{inspect.token_breakdown.canvas_brief_tokens} tokens</strong>
+                      </div>
+                      <div style={{ padding: 10, borderRadius: 10, background: "var(--bg-ivory-2)" }}>
+                        <div style={{ color: "var(--text-secondary)", fontSize: 11 }}>记忆窗口估算</div>
+                        <strong>{inspect.token_breakdown.memory_estimated_tokens} tokens</strong>
+                      </div>
+                      <div style={{ padding: 10, borderRadius: 10, background: "var(--bg-ivory-2)" }}>
+                        <div style={{ color: "var(--text-secondary)", fontSize: 11 }}>上下文水位</div>
+                        <strong>{inspect.token_breakdown.utilization_pct}%</strong>
+                      </div>
+                    </div>
+                    <pre
+                      style={{
+                        margin: 0,
+                        padding: 12,
+                        borderRadius: 12,
+                        background: "#18181b",
+                        color: "#f4f4f5",
+                        fontSize: 11.5,
+                        maxHeight: 340,
+                        overflow: "auto",
+                      }}
+                    >
+                      {JSON.stringify(
+                        {
+                          canvas_brief: inspect.canvas_brief,
+                          layout_verification: {
+                            passed: inspect.layout_verification.passed,
+                            issues: inspect.layout_verification.issues,
+                            bounds: inspect.layout_verification.bounds,
+                          },
+                        },
+                        null,
+                        2,
+                      )}
+                    </pre>
+                  </div>
+                )}
+
+                {leftTab === "events" && (
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: 12,
+                      borderRadius: 12,
+                      background: "#18181b",
+                      color: "#e4e4e7",
+                      fontSize: 11,
+                      maxHeight: 420,
+                      overflow: "auto",
+                    }}
+                  >
+                    {events.length > 0
+                      ? JSON.stringify(events, null, 2)
+                      : "暂无实时 SSE 流事件，点击「启动闭环运行」后这里将实时记录 Coordinator/Planner/Editor/Verifier/Reviewer 原始消息。"}
+                  </pre>
+                )}
+              </section>
+
+              {/* Right Pane: Loop Trace + Harness Memory Dashboard */}
+              <section style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {/* Harness Memory Card */}
+                <div style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <strong style={{ fontSize: 14.5 }}>Harness 画布记忆引擎</strong>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button type="button" className="fc-btn fc-btn-sm" onClick={handleCompactMemory}>
+                        手动压缩记忆
+                      </button>
+                      <button type="button" className="fc-btn fc-btn-sm" onClick={handleClearMemory}>
+                        清空
+                      </button>
+                    </div>
+                  </div>
+
+                  {inspect && (
+                    <>
+                      <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", justifyContent: "space-between" }}>
+                        <span>
+                          已压缩 {inspect.memory.compacted_run_count} 轮 · 近期窗口{" "}
+                          {inspect.memory.recent_run_count} 轮
+                        </span>
+                        <span>
+                          {inspect.memory.estimated_tokens} /{" "}
+                          {inspect.memory.compaction_threshold_tokens}（65% 压缩线）
+                        </span>
+                      </div>
+                      <div style={{ height: 8, borderRadius: 99, background: "var(--bg-ivory-2)", overflow: "hidden" }}>
+                        <div
+                          style={{
+                            height: "100%",
+                            width: `${Math.min(
+                              100,
+                              Math.round(
+                                (inspect.memory.estimated_tokens /
+                                  Math.max(1, inspect.memory.compaction_threshold_tokens)) *
+                                  100,
+                              ),
+                            )}%`,
+                            background: "#111111",
+                            transition: "width 240ms ease",
+                          }}
+                        />
+                      </div>
+                      <div style={{ fontSize: 12, background: "var(--bg-ivory-2)", padding: "8px 10px", borderRadius: 10 }}>
+                        <strong>Core Memory 摘要：</strong>
+                        <div style={{ marginTop: 4, color: "var(--text-secondary)", whiteSpace: "pre-wrap" }}>
+                          {inspect.memory.compacted_summary || "尚未触发蒸馏摘要（积累多轮或点击「手动压缩记忆」查看效果）"}
+                        </div>
+                      </div>
+                      {inspect.memory.rejected_feedback.length > 0 && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
+                            已记住的否决/回退模式：
+                          </span>
+                          {inspect.memory.rejected_feedback.map((item, i) => (
+                            <div
+                              key={`${item}-${i}`}
+                              style={{
+                                fontSize: 11.5,
+                                padding: "5px 8px",
+                                borderRadius: 8,
+                                background: "var(--danger-soft)",
+                                color: "var(--danger)",
+                              }}
+                            >
+                              {item}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Loop History & Repair Rounds */}
+                <div style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <strong style={{ fontSize: 14.5 }}>Agent 自纠错循环追踪</strong>
+
+                  {activeRun?.proposal?.repair_history && activeRun.proposal.repair_history.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {activeRun.proposal.repair_history.map((round) => (
+                        <div
+                          key={round.round}
+                          style={{
+                            padding: "8px 10px",
+                            borderRadius: 10,
+                            border: "1px solid var(--border-hairline)",
+                            background: round.approved
+                              ? "rgba(22, 163, 74, 0.08)"
+                              : "rgba(220, 38, 38, 0.07)",
+                            fontSize: 12,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 600 }}>
+                            <span>第 {round.round} 轮 · {round.approved ? "审阅通过" : "驳回重修"}</span>
+                            <span>
+                              几何校验：{round.verifier_passed ? "通过" : `${round.issue_count} 个碰撞`}
+                            </span>
+                          </div>
+                          {round.feedback && (
+                            <div style={{ marginTop: 4, color: "var(--text-secondary)" }}>{round.feedback}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto" }}>
+                    {events.length > 0 ? (
+                      events
+                        .filter((e) => e.type === "thinking" || e.type === "verifier" || e.type === "tool_call")
+                        .map((e) => (
+                          <div
+                            key={e.sequence}
+                            style={{
+                              padding: "7px 10px",
+                              borderRadius: 10,
+                              background: "var(--bg-ivory-2)",
+                              fontSize: 12,
+                            }}
+                          >
+                            <div style={{ fontWeight: 600 }}>
+                              [{String(e.data.role || e.data.tool || e.type)}]{" "}
+                              {String(e.data.title || e.data.label || "")}
+                            </div>
+                            {Boolean(e.data.text) && (
+                              <div style={{ color: "var(--text-secondary)", marginTop: 2 }}>
+                                {String(e.data.text)}
+                              </div>
+                            )}
+                          </div>
+                        ))
+                    ) : activeRun?.tasks && activeRun.tasks.length > 0 ? (
+                      activeRun.tasks.map((t) => (
+                        <div
+                          key={t.id}
+                          style={{
+                            padding: "7px 10px",
+                            borderRadius: 10,
+                            background: "var(--bg-ivory-2)",
+                            fontSize: 12,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 600 }}>
+                            <span>
+                              {t.role} · {t.title}
+                            </span>
+                            <span>{t.status}</span>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                        点击上方「启动闭环运行」，即可实时观察 Coordinator → Planner → Canvas Editor → Verifier → Reviewer 循环状态。
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+            </div>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}

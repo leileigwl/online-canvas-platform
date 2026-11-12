@@ -494,7 +494,13 @@ export function AgentSettingsPage() {
 
               <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12 }}>
                 <span style={{ color: "var(--text-secondary)" }}>
-                  API Key（{editingImgId ? "留空则保留当前配置已加密密钥" : "新增配置必填"}）
+                  API Key（
+                  {imgProvider === "mock"
+                    ? "内置 Mock 测试引擎免填，可留空保存"
+                    : editingImgId
+                      ? "留空则保留当前配置已加密密钥"
+                      : "新增配置必填"}
+                  ）
                 </span>
                 <input
                   type="password"

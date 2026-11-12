@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import re
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from typing import Protocol
 from uuid import UUID
 
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 from canvas_api.providers.chat import build_safe_async_client, validate_public_https_url
 
@@ -80,6 +81,86 @@ class UnconfiguredImageProvider:
     async def edit(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
         del request
         raise ImageProviderNotConfigured("当前没有配置改图服务，请前往「模型与生图设置」配置密钥")
+
+
+class MockImageProvider:
+    """Retained deterministic placeholder adapter for Harness/Agent debugging without API keys."""
+
+    _PALETTES = (
+        ((248, 244, 236), (229, 217, 198), (168, 124, 79), (28, 25, 23)),
+        ((241, 244, 248), (213, 223, 236), (69, 104, 146), (22, 27, 34)),
+        ((245, 247, 243), (219, 229, 214), (92, 131, 98), (24, 30, 25)),
+        ((249, 243, 240), (235, 214, 206), (176, 98, 72), (34, 24, 22)),
+    )
+
+    def __init__(self, *, default_model: str = "mock-studio-v1", latency_ms: int = 120) -> None:
+        self.default_model = default_model
+        self.latency_ms = max(0, latency_ms)
+
+    def _render_variant(self, request: ImageGenerationRequest, idx: int) -> GeneratedImage:
+        raw_w, raw_h = _ratio_dimensions(request.aspect_ratio, request.width, request.height)
+        scale = min(1.0, 896 / max(raw_w, raw_h))
+        w = max(256, int(round(raw_w * scale / 16) * 16))
+        h = max(256, int(round(raw_h * scale / 16) * 16))
+
+        digest = hashlib.sha256(
+            f"{request.prompt}:{request.aspect_ratio}:{len(request.reference_images)}:{idx}".encode()
+        ).digest()
+        bg, card, accent, ink = self._PALETTES[digest[0] % len(self._PALETTES)]
+        img = Image.new("RGB", (w, h), bg)
+        draw = ImageDraw.Draw(img)
+
+        # Minimalist gallery composition so each mock prompt produces a distinct visual card
+        margin = max(20, min(w, h) // 18)
+        draw.rounded_rectangle(
+            (margin, margin, w - margin, h - margin),
+            radius=16,
+            fill=card,
+            outline=ink,
+            width=2,
+        )
+        cx = int(w * (0.35 + (digest[1] % 30) / 100))
+        cy = int(h * (0.42 + (digest[2] % 22) / 100))
+        radius = max(36, min(w, h) // 5)
+        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill=accent)
+        bar_w = int(w * 0.42)
+        draw.rounded_rectangle(
+            (margin * 2, h - margin * 3, margin * 2 + bar_w, h - margin * 3 + 12),
+            radius=6,
+            fill=ink,
+        )
+
+        font = ImageFont.load_default()
+        ref_count = len(request.reference_images) or len(request.reference_asset_ids)
+        mode_tag = f"MOCK EDIT ({ref_count} REF)" if ref_count else "MOCK TEXT->IMG"
+        ratio_tag = request.aspect_ratio if request.aspect_ratio != "auto" else f"{w}x{h}"
+        ascii_prompt = (
+            "".join(ch if 32 <= ord(ch) < 127 else " " for ch in request.prompt).strip()
+            or "Visual Concept"
+        )[:40]
+        lines = [
+            f"FLOWCANVAS · {mode_tag}",
+            f"MODEL: {self.default_model}  |  RATIO: {ratio_tag}  |  #{idx + 1}",
+            f"SEED: {digest.hex()[:10].upper()}",
+            f"PROMPT: {ascii_prompt}",
+        ]
+        y_cursor = margin + 16
+        for line in lines:
+            draw.text((margin + 18, y_cursor), line, fill=ink, font=font)
+            y_cursor += 18
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return GeneratedImage(content=buf.getvalue(), mime_type="image/png", width=w, height=h)
+
+    async def generate(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
+        if self.latency_ms:
+            await asyncio.sleep(self.latency_ms / 1000)
+        count = max(1, min(request.count, 4))
+        return [self._render_variant(request, idx) for idx in range(count)]
+
+    async def edit(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
+        return await self.generate(request)
 
 
 def _decode_b64_image(

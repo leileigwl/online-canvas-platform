@@ -27,12 +27,18 @@ from canvas_api.providers.images import (
     ImageGenerationRequest,
     ImageProviderError,
     ImageProviderNotConfigured,
+    MockImageProvider,
     ReferenceImage,
     UnconfiguredImageProvider,
 )
 from canvas_api.security import decrypt_secret
 from canvas_api.storage import ObjectStorage, create_storage
-from canvas_api.tools import TOOL_SPECS, PlanValidationError, validate_plan
+from canvas_api.tools import (
+    TOOL_SPECS,
+    PlanValidationError,
+    validate_plan,
+    verify_proposal_layout,
+)
 from langgraph.types import StreamWriter
 from sqlalchemy import and_, func, or_, select, update
 
@@ -116,9 +122,15 @@ EDITOR_PROMPT = "\n".join(
 )
 REVIEWER_PROMPT = "\n".join(
     (
-        "你是 FlowCanvas Reviewer。检查提案是否符合用户目标、Planner 方案和白名单工具规范。",
+        (
+            "你是 FlowCanvas Reviewer。结合确定性几何校验报告（verifier_report）、"
+            "用户目标与 Planner 方案，审核本次提案。"
+        ),
         '只返回 JSON：{"approved":true,"thinking":"审阅要点","feedback":"简短中文审阅意见"}。',
-        "仅当所有操作属于 8 个白名单画布/生图工具且未越权移动无关对象时 approved 才为 true。",
+        (
+            "若 verifier_report.passed 为 false，或存在坐标重叠、越界、偏离用户目标、"
+            "越权移动无关对象等问题，必须返回 approved=false 并给出可执行的修改意见。"
+        ),
     )
 )
 logger = logging.getLogger(__name__)
@@ -128,8 +140,195 @@ MAX_PARALLEL_SUBTASKS = 3
 MAX_PROPOSAL_OPERATIONS = 12
 
 
-def _model_for_role(config: dict, role: str) -> str:
+def _model_for_role(config: dict | None, role: str) -> str:
+    if not config:
+        return "scripted-harness"
     return (config.get("role_models") or {}).get(role) or config["model"]
+
+
+def _scripted_model_response(*, system: str, user: str, lab_scenario: str) -> dict:
+    payload = json.loads(user)
+    if "Harness Memory Compactor" in system:
+        turns = payload.get("turns_to_compact") or []
+        prev = str(payload.get("previous_core_memory") or "").strip()
+        rejected = payload.get("rejected_patterns") or []
+        summary_lines = [
+            f"[{t.get('decision', 'proposed')}] {str(t.get('goal', ''))[:60]}"
+            for t in turns[-6:]
+        ]
+        if prev:
+            summary_lines.insert(0, prev[:240])
+        if rejected:
+            summary_lines.append("规避否决模式: " + "; ".join(str(x)[:50] for x in rejected[-3:]))
+        return {"core_memory": " | ".join(summary_lines)[:500] or "已完成历史对话压缩"}
+
+    if "FlowCanvas Coordinator" in system:
+        goal = str(payload.get("goal") or "创意排版与生图")
+        return {
+            "summary": f"协同生成并排版：{goal[:40]}",
+            "thinking": (
+                f"按设计目标拆分为「生图生成」与「注释排版」两个有序子任务"
+                f"（场景：{lab_scenario}）。"
+            ),
+            "subtasks": [
+                {
+                    "id": "task-1",
+                    "title": "生成视觉主图",
+                    "goal": f"根据目标生成核心视觉图像：{goal[:180]}",
+                    "depends_on": [],
+                },
+                {
+                    "id": "task-2",
+                    "title": "补充版式说明便签",
+                    "goal": "在生成主图右侧生成配套设计说明便签，保持间距与构图呼吸感。",
+                    "depends_on": ["task-1"],
+                },
+            ],
+        }
+
+    if "FlowCanvas Planner" in system:
+        subtasks = payload.get("subtasks") or []
+        return {
+            "thinking": (
+                "先定位当前画布空余右缘区域，主图采用 3:4 比例，"
+                "说明卡片保留 32px 水平安全间距。"
+            ),
+            "plans": [
+                {
+                    "task_id": t["id"],
+                    "plan": (
+                        "在安全空位生成 240x320 主图"
+                        if t["id"] == "task-1"
+                        else "在主图右侧保留 >=32px 间距摆放 240x160 说明便签"
+                    ),
+                }
+                for t in subtasks
+            ],
+        }
+
+    if "FlowCanvas Canvas Editor" in system:
+        subtask = payload.get("subtask") or {}
+        attempt = int(payload.get("attempt") or 0)
+        canvas_items = payload.get("canvas") or []
+        existing_max_x = max(
+            (float(it.get("x", 0)) + float(it.get("width", 0)) for it in canvas_items),
+            default=-120.0,
+        )
+        base_x = round(existing_max_x + 48, 1) if canvas_items else -120.0
+        task_id = subtask.get("id", "task-1")
+        ref_ids = [
+            it["id"]
+            for it in canvas_items
+            if it.get("type") == "image" and it.get("id")
+        ][:1]
+
+        if task_id == "task-1":
+            if lab_scenario == "collision_repair" and attempt == 0:
+                return {
+                    "thinking": (
+                        "尝试第 1 轮先在基准坐标 (0, -80) 放置主图，"
+                        "等待 Verifier 与 Reviewer 检查边界。"
+                    ),
+                    "operations": [
+                        {
+                            "tool": "edit_image" if ref_ids else "generate_image",
+                            "params": {
+                                "prompt": str(payload.get("goal") or "Warm editorial still life"),
+                                **({"reference_object_ids": ref_ids} if ref_ids else {}),
+                                "x": 0,
+                                "y": -80,
+                                "width": 260,
+                                "height": 320,
+                                "aspect_ratio": "3:4",
+                            },
+                        }
+                    ],
+                }
+            return {
+                "thinking": (
+                    f"第 {attempt + 1} 轮根据校验反馈将主图安全放置于 x={base_x} 空闲画廊区域。"
+                ),
+                "operations": [
+                    {
+                        "tool": "edit_image" if ref_ids else "generate_image",
+                        "params": {
+                            "prompt": str(payload.get("goal") or "Warm editorial still life"),
+                            **({"reference_object_ids": ref_ids} if ref_ids else {}),
+                            "x": base_x,
+                            "y": -140,
+                            "width": 240,
+                            "height": 320,
+                            "aspect_ratio": "3:4",
+                        },
+                    }
+                ],
+            }
+
+        # task-2 note placement
+        if lab_scenario == "collision_repair" and attempt == 0:
+            return {
+                "thinking": (
+                    "第 1 轮故意在 (40, -20) 放置便签，"
+                    "测试确定性几何校验器能否拦截重叠冲突。"
+                ),
+                "operations": [
+                    {
+                        "tool": "add_note",
+                        "params": {
+                            "title": "设计企划注释",
+                            "content": f"响应目标：{str(payload.get('goal') or '')[:80]}",
+                            "x": 40,
+                            "y": -20,
+                            "width": 240,
+                            "height": 160,
+                        },
+                    }
+                ],
+            }
+        dep_ops = (payload.get("completed_dependency_operations") or {}).get("task-1") or []
+        anchor_x = base_x
+        if dep_ops:
+            dp = dep_ops[0].get("params") or {}
+            anchor_x = float(dp.get("x", base_x)) + float(dp.get("width", 240)) + 32
+        return {
+            "thinking": (
+                f"第 {attempt + 1} 轮读取前置生成图边界"
+                f"并在 x={round(anchor_x, 1)} 无重叠摆放说明便签。"
+            ),
+            "operations": [
+                {
+                    "tool": "add_note",
+                    "params": {
+                        "title": "Harness 闭环设计说明",
+                        "content": (
+                            f"目标：{str(payload.get('goal') or '')[:80]}\n"
+                            f"闭环轮次：第 {attempt + 1} 轮（无重叠碰撞）"
+                        ),
+                        "x": round(anchor_x, 1),
+                        "y": -140,
+                        "width": 240,
+                        "height": 160,
+                    },
+                }
+            ],
+        }
+
+    # Reviewer role
+    verifier_report = payload.get("verifier_report") or {"passed": True, "issues": []}
+    if not verifier_report.get("passed", True):
+        issues = verifier_report.get("issues") or []
+        msg = "；".join(str(it.get("message") or "") for it in issues[:2])
+        suggestion = "；".join(str(it.get("suggestion") or "") for it in issues[:2])
+        return {
+            "approved": False,
+            "thinking": f"确定性几何校验器发现 {len(issues)} 处布局问题，打回 Canvas Editor 修复。",
+            "feedback": f"检测到布局碰撞：{msg}。{suggestion}",
+        }
+    return {
+        "approved": True,
+        "thinking": "确定性几何校验与白名单工具审阅均通过，无元素重叠或越界。",
+        "feedback": "布局间距合理、工具契约合规，审阅通过。",
+    }
 
 
 def _validate_subtasks(raw: object) -> tuple[str, list[dict]]:
@@ -619,11 +818,17 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             return
         await session.refresh(run)
         generation_settings = run.generation_settings
+        harness_options = dict(run.harness_options or {})
+        llm_mode = str(harness_options.get("llm_mode") or "real")
+        use_mock_image = bool(harness_options.get("use_mock_image", False))
+        lab_scenario = str(harness_options.get("lab_scenario") or "normal")
+        force_compact = bool(harness_options.get("force_compact", False))
+        max_repair_rounds = max(0, min(3, int(harness_options.get("max_repair_rounds", 2))))
         completion_tokens_per_call = run.completion_tokens_per_call
         model_config = await session.scalar(
             select(ModelConfig).where(ModelConfig.owner_id == run.owner_id)
         )
-        if model_config is None and generation_settings is None:
+        if model_config is None and generation_settings is None and llm_mode != "scripted":
             message = "尚未配置语言模型，请先完成 Agent 设置。"
             await _fail_run(session, run, message)
             return
@@ -767,9 +972,19 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         },
     }
 
+    materialized_cache: dict[tuple, dict] = {}
+
     async def materialize_image_op(operation: dict) -> dict:
         params = operation["params"]
         ref_object_ids = params.get("reference_object_ids", [])
+        cache_key = (
+            operation["tool"],
+            params["prompt"],
+            tuple(str(oid) for oid in ref_object_ids),
+            params.get("aspect_ratio", "auto"),
+        )
+        if cache_key in materialized_cache:
+            return {**operation, "result": materialized_cache[cache_key]}
         items_by_id = {item["id"]: item for item in canvas_items if isinstance(item, dict)}
         ordered_asset_ids = [
             uuid.UUID(str(items_by_id[oid]["asset_id"]))
@@ -777,9 +992,12 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             if items_by_id.get(oid) and items_by_id[oid].get("asset_id")
         ]
         async with session_factory() as session:
-            img_provider = await resolve_user_image_provider(
-                session, owner_id, settings, fallback=fallback_img_provider
-            )
+            if use_mock_image:
+                img_provider = MockImageProvider(latency_ms=80)
+            else:
+                img_provider = await resolve_user_image_provider(
+                    session, owner_id, settings, fallback=fallback_img_provider
+                )
             ref_images: list[ReferenceImage] = []
             if ordered_asset_ids:
                 rows = list(
@@ -831,21 +1049,23 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 name_prefix=params["prompt"][:24] or "Agent 生成图",
             )
         asset = saved_assets[0]
-        return {
-            **operation,
-            "result": {
-                "asset_id": str(asset.id),
-                "src": f"/api/assets/{asset.id}/content",
-                "width": asset.width,
-                "height": asset.height,
-                "title": asset.name,
-            },
+        result_meta = {
+            "asset_id": str(asset.id),
+            "src": f"/api/assets/{asset.id}/content",
+            "width": asset.width,
+            "height": asset.height,
+            "title": asset.name,
         }
+        materialized_cache[cache_key] = result_meta
+        return {**operation, "result": result_meta}
 
     async def call_model(*, model: str, system: str, user: str) -> dict:
         # Reserve before contacting the provider so ARQ retries and Worker restarts
         # consume the same durable per-run allowance.
         await _reserve_agent_model_call(session_factory, run_uuid)
+
+        if llm_mode == "scripted" or model_config_data is None:
+            return _scripted_model_response(system=system, user=user, lab_scenario=lab_scenario)
 
         response = await provider.complete_json(
             base_url=model_config_data["base_url"],
@@ -877,13 +1097,33 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
 
     async def _maybe_compact_harness_memory(writer: StreamWriter) -> None:
         nonlocal compacted_summary, approx_tokens
-        should_compact = len(recent_runs) > 2 and (
-            len(recent_runs) >= 6 or approx_tokens >= compact_threshold
+        should_compact = (
+            (force_compact and len(recent_runs) >= 1)
+            or (lab_scenario == "memory_compaction" and len(recent_runs) >= 1)
+            or (
+                len(recent_runs) > 2
+                and (len(recent_runs) >= 6 or approx_tokens >= compact_threshold)
+            )
         )
         if not should_compact:
+            if force_compact and len(recent_runs) == 0:
+                writer(
+                    {
+                        "kind": "thinking",
+                        "role": "Harness Memory",
+                        "title": "Harness 记忆预检",
+                        "text": "当前画布尚无历史完成轮次，本轮结果将在结束后进入近期记忆窗口。",
+                    }
+                )
             return
-        head_runs = recent_runs[:-2]
-        tail_payload = [_summarize_turn(r) for r in recent_runs[-2:]]
+        keep_tail = (
+            1
+            if (force_compact or lab_scenario == "memory_compaction") and len(recent_runs) <= 2
+            else 2
+        )
+        head_runs = recent_runs[:-keep_tail] if len(recent_runs) > keep_tail else recent_runs
+        tail_runs = recent_runs[-keep_tail:] if len(recent_runs) > keep_tail else []
+        tail_payload = [_summarize_turn(r) for r in tail_runs]
         writer(
             {
                 "kind": "thinking",
@@ -1036,13 +1276,17 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         return {"plans": plans}
 
     async def canvas_editor(state: AgentState, writer: StreamWriter) -> dict:
+        attempt = int(state.get("attempt") or 0)
+        review_feedback = str(state.get("review_feedback") or "")
+        verifier_issues = list((state.get("verifier_report") or {}).get("issues") or [])
+
         async def run_editor(
             task: dict,
             sequence: int,
             prior_outputs: dict[str, list[dict]],
         ) -> tuple[str, list[dict]]:
             existing = await _task_record(session_factory, run_uuid, sequence)
-            if existing and existing["status"] == RunStatus.SUCCEEDED:
+            if attempt == 0 and existing and existing["status"] == RunStatus.SUCCEEDED:
                 saved = existing["output"] or {}
                 operations = validate_plan(
                     saved.get("operations", []), canvas_items, allow_result=True
@@ -1054,6 +1298,9 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 **user_context,
                 "subtask": task,
                 "planner_plan": state["plans"][task["id"]],
+                "attempt": attempt,
+                "review_feedback": review_feedback,
+                "verifier_issues": verifier_issues,
                 "completed_dependency_operations": {
                     dep: prior_outputs.get(dep, []) for dep in task["depends_on"]
                 },
@@ -1148,30 +1395,66 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             raise PlanValidationError("合并提案超过 12 个画布操作")
         return {"operations": operations, "editor_outputs": editor_outputs}
 
+    async def verifier(state: AgentState, writer: StreamWriter) -> dict:
+        attempt = int(state.get("attempt") or 0)
+        report = verify_proposal_layout(canvas_items, state["operations"])
+        summary_report = {k: v for k, v in report.items() if k != "preview_items"}
+        issues = summary_report.get("issues") or []
+        writer(
+            {
+                "kind": "verifier",
+                "role": "Verifier",
+                "attempt": attempt + 1,
+                "title": (
+                    f"第 {attempt + 1} 轮几何与契约校验通过"
+                    if summary_report["passed"]
+                    else f"第 {attempt + 1} 轮发现 {len(issues)} 项布局问题"
+                ),
+                "text": (
+                    "无碰撞重叠与越界，准许进入 Reviewer 终审。"
+                    if summary_report["passed"]
+                    else "；".join(str(it.get("message") or "") for it in issues[:3])
+                ),
+                **summary_report,
+            }
+        )
+        return {"verifier_report": summary_report}
+
     async def reviewer(state: AgentState, writer: StreamWriter) -> dict:
+        attempt = int(state.get("attempt") or 0)
+        max_repairs = int(
+            state.get("max_repair_rounds")
+            if state.get("max_repair_rounds") is not None
+            else max_repair_rounds
+        )
         sequence = len(state["subtasks"]) + 2
         existing = await _task_record(session_factory, run_uuid, sequence)
         output = (
-            existing["output"] if existing and existing["status"] == RunStatus.SUCCEEDED else None
+            existing["output"]
+            if attempt == 0 and existing and existing["status"] == RunStatus.SUCCEEDED
+            else None
         )
         if output is not None:
-            return {"review": output}
+            return {"review": {**output, "needs_repair": False}}
         if not await set_task_state(sequence, RunStatus.RUNNING):
             raise RunCanceled
+        verifier_report = state.get("verifier_report") or {"passed": True, "issues": []}
         writer(
             {
                 "kind": "thinking",
                 "role": "Reviewer",
-                "title": "安全与质量审阅",
-                "text": f"正在核验 {len(state['operations'])} 项画布操作提案...",
+                "title": f"安全与质量审阅（第 {attempt + 1} 轮）",
+                "text": f"正在结合确定性几何报告核验 {len(state['operations'])} 项画布操作...",
             }
         )
         review_context = {
             **user_context,
+            "attempt": attempt,
             "subtasks": state["subtasks"],
             "planner_plans": state["plans"],
             "editor_outputs": state["editor_outputs"],
             "operations": state["operations"],
+            "verifier_report": verifier_report,
         }
         response = await call_model(
             model=_model_for_role(model_config_data, "Reviewer"),
@@ -1179,20 +1462,69 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             user=json.dumps(review_context, ensure_ascii=False),
         )
         approved = response.get("approved")
-        feedback = response.get("feedback", "")
+        feedback = str(response.get("feedback") or "")
         if not isinstance(approved, bool):
             raise ProviderError("Reviewer 没有返回有效审阅结果")
-        if not approved:
-            raise ProviderError(str(feedback or "Reviewer 未通过本次提案")[:500])
-        review = {"approved": True, "feedback": str(feedback)[:500]}
-        if not await set_task_state(sequence, RunStatus.SUCCEEDED, review):
+        if not verifier_report.get("passed", True):
+            approved = False
+            issue_text = "；".join(
+                str(it.get("message") or "") + " " + str(it.get("suggestion") or "")
+                for it in (verifier_report.get("issues") or [])[:3]
+            ).strip()
+            if issue_text and issue_text not in feedback:
+                feedback = f"{feedback} {issue_text}".strip()
+
+        next_history = [
+            *(state.get("repair_history") or []),
+            {
+                "round": attempt + 1,
+                "verifier_passed": bool(verifier_report.get("passed", True)),
+                "issue_count": int(verifier_report.get("issue_count", 0)),
+                "approved": approved,
+                "feedback": feedback[:300],
+            },
+        ]
+        if not approved and attempt < max_repairs:
+            writer(
+                {
+                    "kind": "thinking",
+                    "role": "Reviewer",
+                    "title": f"第 {attempt + 1} 轮驳回，触发自动自修复闭环",
+                    "text": feedback[:400] or "发现布局或规则问题，打回 Canvas Editor 重试。",
+                }
+            )
+            return {
+                "attempt": attempt + 1,
+                "review_feedback": feedback[:500],
+                "repair_history": next_history,
+                "review": {
+                    "approved": False,
+                    "needs_repair": True,
+                    "feedback": feedback[:500],
+                    "verifier_issues": verifier_report.get("issues") or [],
+                },
+            }
+
+        review_summary = {
+            "approved": bool(approved),
+            "passed_verifier": bool(verifier_report.get("passed", True)),
+            "attempt_count": attempt + 1,
+            "needs_manual_review": not bool(approved),
+            "feedback": feedback[:500],
+            "verifier_issues": verifier_report.get("issues") or [],
+        }
+        if not await set_task_state(sequence, RunStatus.SUCCEEDED, review_summary):
             raise RunCanceled
-        return {"review": review}
+        return {
+            "repair_history": next_history,
+            "review": {**review_summary, "needs_repair": False},
+        }
 
     nodes = {
         "coordinator": coordinator,
         "planner": planner,
         "canvas_editor": canvas_editor,
+        "verifier": verifier,
         "reviewer": reviewer,
     }
     try:
@@ -1206,6 +1538,9 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     "context_revision": context_revision,
                     "canvas_items": _canvas_summary(canvas_items),
                     "references": references,
+                    "attempt": 0,
+                    "max_repair_rounds": max_repair_rounds,
+                    "repair_history": [],
                 },
                 {"configurable": {"thread_id": run_id}},
                 stream_mode=["updates", "custom"],
@@ -1231,6 +1566,9 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 "applied": False,
                 "reviewed": True,
                 "review": result["review"],
+                "verifier": result.get("verifier_report"),
+                "repair_history": result.get("repair_history") or [],
+                "attempt_count": int(result.get("attempt") or 0) + 1,
             }
             completed = await session.execute(
                 update(AgentRun)

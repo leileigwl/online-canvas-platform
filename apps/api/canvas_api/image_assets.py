@@ -15,6 +15,7 @@ from canvas_api.providers.images import (
     GeneratedImage,
     ImageGenerationProvider,
     ImageProviderError,
+    MockImageProvider,
     UnconfiguredImageProvider,
 )
 from canvas_api.security import decrypt_secret
@@ -124,6 +125,9 @@ async def resolve_user_image_provider(
     config_id: uuid.UUID | None = None,
 ) -> ImageGenerationProvider:
     """Resolve user's encrypted BYOK image provider by id, model match, or default profile."""
+    if (requested_model or "").strip().lower().startswith("mock-studio"):
+        return MockImageProvider(default_model=requested_model or "mock-studio-v1")
+
     configs = list(
         await session.scalars(
             select(ImageModelConfig)
@@ -148,6 +152,8 @@ async def resolve_user_image_provider(
             selected = next((c for c in configs if c.is_default), configs[0])
 
     if selected is not None:
+        if selected.provider == "mock":
+            return MockImageProvider(default_model=selected.model_name or "mock-studio-v1")
         return ConfiguredImageProvider(
             provider=selected.provider,
             base_url=selected.base_url,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal
 
@@ -259,6 +260,128 @@ def apply_canvas_operation(items: list[dict], operation: dict, *, new_id: str) -
                 "visible": True,
             }
         )
+
+
+def verify_proposal_layout(canvas_items: list[dict], operations: list[dict]) -> dict:
+    """Run deterministic spatial & contract checks on proposed canvas operations."""
+    simulated = [deepcopy(item) for item in canvas_items if isinstance(item, dict)]
+    existing_ids = {str(item.get("id")) for item in simulated if item.get("id")}
+    touched_ids: set[str] = set()
+
+    for idx, raw_op in enumerate(operations):
+        op = deepcopy(raw_op)
+        if op.get("tool") in {"generate_image", "edit_image"} and not (op.get("result") or {}).get(
+            "asset_id"
+        ):
+            op["result"] = {"asset_id": f"sim-asset-{idx}", "title": "preview"}
+        new_id = f"sim-new-{idx}"
+        op_name = op.get("tool")
+        params = op.get("params") or {}
+        if op_name in {"move_object", "resize_object"} and params.get("object_id"):
+            touched_ids.add(str(params["object_id"]))
+        elif op_name == "align_objects":
+            touched_ids.update(str(oid) for oid in (params.get("object_ids") or []))
+        else:
+            touched_ids.add(new_id)
+        apply_canvas_operation(simulated, op, new_id=new_id)
+
+    layout_items = [
+        it
+        for it in simulated
+        if it.get("visible", True)
+        and it.get("type") != "connector"
+        and not (it.get("type") == "shape" and it.get("shape_kind") == "frame")
+        and isinstance(it.get("x"), (int, float))
+        and isinstance(it.get("y"), (int, float))
+        and isinstance(it.get("width"), (int, float))
+        and isinstance(it.get("height"), (int, float))
+        and float(it["width"]) > 0
+        and float(it["height"]) > 0
+    ]
+
+    issues: list[dict] = []
+    for item in layout_items:
+        item_id = str(item.get("id"))
+        if item_id not in touched_ids and item_id in existing_ids:
+            continue
+        x, y, w, h = (
+            float(item["x"]),
+            float(item["y"]),
+            float(item["width"]),
+            float(item["height"]),
+        )
+        if abs(x) > 25_000 or abs(y) > 25_000:
+            issues.append(
+                {
+                    "code": "out_of_bounds",
+                    "object_ids": [item_id],
+                    "message": f"对象 {item_id} 坐标 ({round(x)}, {round(y)}) 超出合理画布视口范围",
+                    "suggestion": "请将坐标调整回 [-4000, 4000] 的核心视口区域内",
+                }
+            )
+        if item.get("type") == "image" and (w / h > 8 or h / w > 8):
+            issues.append(
+                {
+                    "code": "extreme_aspect",
+                    "object_ids": [item_id],
+                    "message": f"图片对象 {item_id} 宽高比例 ({round(w)}x{round(h)}) 严重失真",
+                    "suggestion": "请调整宽高使纵横比保持在 1:4 至 4:1 之间",
+                }
+            )
+
+    for i in range(len(layout_items)):
+        a = layout_items[i]
+        aid = str(a.get("id"))
+        ax1, ay1 = float(a["x"]), float(a["y"])
+        aw, ah = float(a["width"]), float(a["height"])
+        ax2, ay2 = ax1 + aw, ay1 + ah
+        for j in range(i + 1, len(layout_items)):
+            b = layout_items[j]
+            bid = str(b.get("id"))
+            if aid not in touched_ids and bid not in touched_ids:
+                continue
+            bx1, by1 = float(b["x"]), float(b["y"])
+            bw, bh = float(b["width"]), float(b["height"])
+            bx2, by2 = bx1 + bw, by1 + bh
+            ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+            iy = max(0.0, min(ay2, by2) - max(ay1, by1))
+            overlap_area = ix * iy
+            min_area = min(aw * ah, bw * bh)
+            if min_area > 0 and (overlap_area / min_area) > 0.12:
+                ratio_pct = round((overlap_area / min_area) * 100)
+                shift_x = round((ax2 + 28) - bx1)
+                issues.append(
+                    {
+                        "code": "overlap",
+                        "object_ids": [aid, bid],
+                        "overlap_ratio": round(overlap_area / min_area, 3),
+                        "message": (
+                            f"对象 {aid} 与 {bid} 发生 {ratio_pct}% 重叠碰撞"
+                            f"（A=[{round(ax1)},{round(ay1)},{round(aw)}x{round(ah)}], "
+                            f"B=[{round(bx1)},{round(by1)},{round(bw)}x{round(bh)}]）"
+                        ),
+                        "suggestion": (
+                            f"建议将 {bid} 水平右移至少 {max(28, shift_x)}px 或垂直错开排布"
+                        ),
+                    }
+                )
+
+    bounds = None
+    if layout_items:
+        bounds = {
+            "min_x": round(min(float(it["x"]) for it in layout_items), 1),
+            "min_y": round(min(float(it["y"]) for it in layout_items), 1),
+            "max_x": round(max(float(it["x"]) + float(it["width"]) for it in layout_items), 1),
+            "max_y": round(max(float(it["y"]) + float(it["height"]) for it in layout_items), 1),
+        }
+
+    return {
+        "passed": len(issues) == 0,
+        "issue_count": len(issues),
+        "issues": issues,
+        "preview_items": simulated,
+        "bounds": bounds,
+    }
 
 
 def public_tool_specs() -> list[dict]:

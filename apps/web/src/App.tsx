@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router";
 import { AccountPage, LoginPage, RegisterPage } from "./pages/AccountPages";
+import { AgentLabPage } from "./pages/AgentLabPage";
 import { AgentSettingsPage } from "./pages/AgentSettingsPage";
 import { AssetsPage } from "./pages/AssetsPage";
 import { HomePage } from "./pages/HomePage";
@@ -35,6 +36,8 @@ export default function App() {
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/account" element={<AccountPage />} />
       <Route path="/settings/agent" element={<AgentSettingsPage />} />
+      <Route path="/agent-lab" element={<AgentLabPage />} />
+      <Route path="/agent-lab/:canvasId" element={<AgentLabPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

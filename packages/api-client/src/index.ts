@@ -42,7 +42,8 @@ export type ImageProviderType =
   | "google-gemini"
   | "dashscope"
   | "volcengine-ark"
-  | "siliconflow";
+  | "siliconflow"
+  | "mock";
 
 export type ImageModelConfig = {
   id?: string | null;
@@ -108,6 +109,37 @@ export type AgentProposalOperation = {
   };
 };
 
+export type HarnessRunOptions = {
+  use_mock_image?: boolean;
+  llm_mode?: "real" | "scripted";
+  lab_scenario?: "normal" | "collision_repair" | "memory_compaction";
+  force_compact?: boolean;
+  max_repair_rounds?: number;
+};
+
+export type LayoutIssue = {
+  code: string;
+  object_ids: string[];
+  overlap_ratio?: number;
+  message: string;
+  suggestion: string;
+};
+
+export type VerifierReport = {
+  passed: boolean;
+  issue_count: number;
+  issues: LayoutIssue[];
+  bounds?: { min_x: number; min_y: number; max_x: number; max_y: number } | null;
+};
+
+export type RepairRoundRecord = {
+  round: number;
+  verifier_passed: boolean;
+  issue_count: number;
+  approved: boolean;
+  feedback: string;
+};
+
 export type AgentRun = {
   id: string;
   canvas_id: string;
@@ -120,13 +152,24 @@ export type AgentRun = {
   completion_usage_reports: number;
   completion_tokens_per_call: number;
   summary: string | null;
+  harness_options?: HarnessRunOptions | null;
   proposal: {
     operations: AgentProposalOperation[];
     generated_assets?: Asset[];
     applied?: boolean;
     rejected?: boolean;
     reverted?: boolean;
-    review?: { approved: boolean; feedback?: string };
+    review?: {
+      approved: boolean;
+      passed_verifier?: boolean;
+      attempt_count?: number;
+      needs_manual_review?: boolean;
+      feedback?: string;
+      verifier_issues?: LayoutIssue[];
+    };
+    verifier?: VerifierReport | null;
+    repair_history?: RepairRoundRecord[];
+    attempt_count?: number;
   } | null;
   error: string | null;
   tasks: AgentTask[];
@@ -142,6 +185,23 @@ export type CanvasMemory = {
   max_context_tokens: number;
   compaction_threshold_tokens: number;
   rejected_feedback: string[];
+};
+
+export type HarnessInspectResult = {
+  canvas_id: string;
+  revision: number;
+  item_count: number;
+  canvas_brief: Array<Record<string, unknown>>;
+  token_breakdown: {
+    memory_estimated_tokens: number;
+    canvas_brief_tokens: number;
+    total_estimated_tokens: number;
+    compaction_threshold_tokens: number;
+    max_context_tokens: number;
+    utilization_pct: number;
+  };
+  memory: CanvasMemory;
+  layout_verification: VerifierReport & { preview_items?: Array<Record<string, unknown>> };
 };
 
 export type RunStreamEvent = {
@@ -345,6 +405,7 @@ export const api = {
     goal: string;
     reference_asset_ids: string[];
     generation_settings?: Omit<ImageGenerationInput, "prompt" | "reference_asset_ids">;
+    harness_options?: HarnessRunOptions;
     idempotency_key: string;
   }) => request<AgentRun>("/agent/runs", { method: "POST", body: json(input) }),
   listAgentRuns: (canvasId: string) =>
@@ -367,6 +428,16 @@ export const api = {
     request<CanvasMemory>(`/canvases/${canvasId}/memory`),
   clearCanvasMemory: (canvasId: string) =>
     request<CanvasMemory>(`/canvases/${canvasId}/memory`, { method: "DELETE" }),
+  inspectCanvasHarness: (canvasId: string, operations: Array<Record<string, unknown>> = []) =>
+    request<HarnessInspectResult>(`/canvases/${canvasId}/harness/inspect`, {
+      method: "POST",
+      body: json({ operations }),
+    }),
+  compactCanvasMemory: (canvasId: string, llm_mode: "real" | "scripted" = "scripted") =>
+    request<CanvasMemory>(`/canvases/${canvasId}/memory/compact`, {
+      method: "POST",
+      body: json({ llm_mode }),
+    }),
   generateImage: (input: ImageGenerationInput) =>
     request<ImageGenerationResult>("/generations", { method: "POST", body: json(input) }),
 };

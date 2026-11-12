@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import { BrandMarkSvg } from "./Icons";
 
 type StudioHeaderProps = {
-  active: "home" | "assets" | "settings";
+  active: "home" | "assets" | "settings" | "lab";
   user: User | null;
   rightSlot?: React.ReactNode;
   returnCanvasId?: string | null;
@@ -43,6 +43,13 @@ export function StudioHeader({ active, user, rightSlot, returnCanvasId }: Studio
           onClick={() => navigate(`/settings/agent${suffix}`)}
         >
           模型与生图设置
+        </button>
+        <button
+          type="button"
+          className={`studio-nav-link ${active === "lab" ? "active" : ""}`}
+          onClick={() => navigate(returnCanvasId ? `/agent-lab/${returnCanvasId}` : "/agent-lab")}
+        >
+          Agent 实验室
         </button>
       </nav>
 

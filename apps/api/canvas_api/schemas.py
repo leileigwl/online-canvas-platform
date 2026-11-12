@@ -300,6 +300,7 @@ ImageProviderLiteral = Literal[
     "dashscope",
     "volcengine-ark",
     "siliconflow",
+    "mock",
 ]
 
 
@@ -363,11 +364,28 @@ def _unique_reference_assets(value: list[uuid.UUID]) -> list[uuid.UUID]:
     return value
 
 
+class HarnessRunOptions(APIModel):
+    use_mock_image: bool = False
+    llm_mode: Literal["real", "scripted"] = "real"
+    lab_scenario: Literal["normal", "collision_repair", "memory_compaction"] = "normal"
+    force_compact: bool = False
+    max_repair_rounds: int = Field(default=2, ge=0, le=3)
+
+
+class HarnessInspectRequest(APIModel):
+    operations: list[dict] = Field(default_factory=list, max_length=12)
+
+
+class MemoryCompactRequest(APIModel):
+    llm_mode: Literal["real", "scripted"] = "scripted"
+
+
 class AgentRunCreate(APIModel):
     canvas_id: uuid.UUID
     goal: str = Field(min_length=1, max_length=4000)
     reference_asset_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
     generation_settings: ImageGenerationOptions | None = None
+    harness_options: HarnessRunOptions | None = None
     idempotency_key: str | None = Field(default=None, max_length=128)
 
     @field_validator("reference_asset_ids")
@@ -402,6 +420,7 @@ class AgentRunOut(APIModel):
     summary: str | None
     proposal: dict | None
     error: str | None
+    harness_options: dict | None = None
     tasks: list[AgentTaskOut]
     created_at: str
     updated_at: str

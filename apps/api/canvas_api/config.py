@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 12 * 1024 * 1024
     auth_rate_limit_per_minute: int = Field(default=30, ge=1, le=1000)
     max_active_agent_runs_per_user: int = Field(default=3, ge=1, le=20)
-    max_agent_model_calls_per_run: int = Field(default=12, ge=1, le=50)
+    max_agent_model_calls_per_run: int = Field(default=18, ge=1, le=50)
     agent_model_completion_tokens_per_call: int = Field(default=2048, ge=128, le=8192)
     chat_completion_token_limit_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     asset_storage: str = "local"

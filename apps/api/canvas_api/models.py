@@ -226,6 +226,7 @@ class AgentRun(UUIDModel):
     summary: Mapped[str | None] = mapped_column(Text, default=None)
     proposal: Mapped[dict | None] = mapped_column(JSON_DOCUMENT, default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
+    harness_options: Mapped[dict | None] = mapped_column(JSON_DOCUMENT, default=None)
     idempotency_key: Mapped[str | None] = mapped_column(String(165), unique=True, default=None)
 
 

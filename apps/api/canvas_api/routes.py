@@ -61,12 +61,17 @@ from canvas_api.models import (
     User,
     UserSession,
 )
-from canvas_api.providers.chat import OpenAICompatibleChatProvider, validate_public_https_url
+from canvas_api.providers.chat import (
+    OpenAICompatibleChatProvider,
+    ProviderError,
+    validate_public_https_url,
+)
 from canvas_api.providers.images import (
     ConfiguredImageProvider,
     ImageGenerationRequest,
     ImageProviderError,
     ImageProviderNotConfigured,
+    MockImageProvider,
     ReferenceImage,
 )
 from canvas_api.schemas import (
@@ -87,9 +92,11 @@ from canvas_api.schemas import (
     EmailCodeRequest,
     FavoriteUpdate,
     GenerationRequest,
+    HarnessInspectRequest,
     ImageModelConfigInput,
     ImageModelConfigOut,
     LoginRequest,
+    MemoryCompactRequest,
     ModelConfigInput,
     ModelConfigOut,
     PasswordChange,
@@ -110,7 +117,13 @@ from canvas_api.security import (
     verify_password_async,
 )
 from canvas_api.storage import ObjectStorage
-from canvas_api.tools import apply_canvas_operation, public_tool_specs, validate_plan
+from canvas_api.tools import (
+    PlanValidationError,
+    apply_canvas_operation,
+    public_tool_specs,
+    validate_plan,
+    verify_proposal_layout,
+)
 
 router = APIRouter(prefix="/api")
 SESSION_COOKIE = "flowcanvas_session"
@@ -1407,10 +1420,13 @@ async def _save_image_config_row(
     target_id: uuid.UUID | None = None,
     upsert_default_when_untargeted: bool = False,
 ) -> ImageModelConfig:
-    try:
-        base_url = await asyncio.to_thread(validate_public_https_url, payload.base_url)
-    except ValueError as error:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
+    if payload.provider == "mock":
+        base_url = "https://mock.flowcanvas.local/v1"
+    else:
+        try:
+            base_url = await asyncio.to_thread(validate_public_https_url, payload.base_url)
+        except ValueError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
 
     existing: ImageModelConfig | None = None
     lookup_id = target_id or payload.id
@@ -1429,7 +1445,7 @@ async def _save_image_config_row(
             .order_by(ImageModelConfig.is_default.desc(), ImageModelConfig.updated_at.desc())
         )
 
-    if existing is None and not payload.api_key:
+    if existing is None and not payload.api_key and payload.provider != "mock":
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "首次保存生图配置时需要提供 API 密钥"
         )
@@ -1624,6 +1640,24 @@ async def test_image_config(
         )
         if saved is not None:
             api_key = decrypt_secret(saved.encrypted_api_key, request.app.state.settings)
+    if payload.provider == "mock":
+        await MockImageProvider(default_model=payload.model_name, latency_ms=0).generate(
+            ImageGenerationRequest(
+                user_id=user.id,
+                prompt="healthcheck",
+                model=payload.model_name,
+                reference_asset_ids=(),
+                quality="auto",
+                width=512,
+                height=512,
+                align_to_16=True,
+                resolution="auto",
+                aspect_ratio="1:1",
+                transparent=False,
+                count=1,
+            )
+        )
+        return {"ok": True, "message": "内置 Mock 生图适配器就绪（无需 API Key）"}
     if not api_key:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "测试连接需要提供 API 密钥")
     try:
@@ -1753,6 +1787,7 @@ def _agent_run_out(run: AgentRun, tasks: list[AgentTask]) -> AgentRunOut:
         summary=run.summary,
         proposal=run.proposal,
         error=run.error,
+        harness_options=run.harness_options,
         tasks=[
             AgentTaskOut(
                 id=t.id,
@@ -1831,6 +1866,11 @@ async def create_agent_run(
         generation_settings=(
             payload.generation_settings.model_dump(mode="json")
             if payload.generation_settings
+            else None
+        ),
+        harness_options=(
+            payload.harness_options.model_dump(mode="json")
+            if payload.harness_options
             else None
         ),
         context_revision=canvas.revision,
@@ -2098,6 +2138,7 @@ async def retry_agent_run(
         goal=original.goal,
         reference_asset_ids=original.reference_asset_ids,
         generation_settings=original.generation_settings,
+        harness_options=original.harness_options,
         context_revision=canvas.revision,
         model_call_budget=original.model_call_budget,
         completion_tokens_per_call=original.completion_tokens_per_call,
@@ -2276,6 +2317,172 @@ async def clear_canvas_memory(
         max_context_tokens=max_tokens,
         compaction_threshold_tokens=int(max_tokens * 0.65),
         rejected_feedback=[],
+    )
+
+
+@router.post("/canvases/{canvas_id}/harness/inspect")
+async def inspect_canvas_harness(
+    canvas_id: uuid.UUID,
+    payload: HarnessInspectRequest,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    canvas = await _owned_canvas(session, user.id, canvas_id)
+    doc = canvas.document if isinstance(canvas.document, dict) else {}
+    items = [item for item in (doc.get("items") or []) if isinstance(item, dict)]
+    ops = payload.operations or []
+    try:
+        validated_ops = validate_plan(ops, items, allow_result=True) if ops else []
+    except PlanValidationError as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
+
+    layout_report = verify_proposal_layout(items, validated_ops)
+    mem_out = await get_canvas_memory(canvas_id, user=user, session=session)
+    canvas_brief = [
+        {
+            "id": it.get("id"),
+            "type": it.get("type"),
+            "x": it.get("x"),
+            "y": it.get("y"),
+            "width": it.get("width"),
+            "height": it.get("height"),
+            "title": str(it.get("title") or "")[:80],
+        }
+        for it in items
+    ]
+    brief_tokens = len(json.dumps(canvas_brief, ensure_ascii=False)) // 3
+    return {
+        "canvas_id": str(canvas.id),
+        "revision": canvas.revision,
+        "item_count": len(items),
+        "canvas_brief": canvas_brief,
+        "token_breakdown": {
+            "memory_estimated_tokens": mem_out.estimated_tokens,
+            "canvas_brief_tokens": brief_tokens,
+            "total_estimated_tokens": mem_out.estimated_tokens + brief_tokens,
+            "compaction_threshold_tokens": mem_out.compaction_threshold_tokens,
+            "max_context_tokens": mem_out.max_context_tokens,
+            "utilization_pct": round(
+                min(
+                    100.0,
+                    ((mem_out.estimated_tokens + brief_tokens) / max(1, mem_out.max_context_tokens))
+                    * 100,
+                ),
+                1,
+            ),
+        },
+        "memory": mem_out.model_dump(mode="json"),
+        "layout_verification": layout_report,
+    }
+
+
+@router.post("/canvases/{canvas_id}/memory/compact", response_model=CanvasMemoryOut)
+async def compact_canvas_memory_now(
+    canvas_id: uuid.UUID,
+    payload: MemoryCompactRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> CanvasMemoryOut:
+    await _owned_canvas(session, user.id, canvas_id)
+    memory = await session.scalar(
+        select(CanvasMemory)
+        .where(CanvasMemory.owner_id == user.id, CanvasMemory.canvas_id == canvas_id)
+        .with_for_update()
+    )
+    cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
+    runs = list(
+        await session.scalars(
+            select(AgentRun)
+            .where(
+                AgentRun.owner_id == user.id,
+                AgentRun.canvas_id == canvas_id,
+                AgentRun.status == RunStatus.SUCCEEDED,
+            )
+            .order_by(AgentRun.created_at.asc())
+        )
+    )
+    anchor = memory.last_compacted_run_id if memory else None
+    recent_runs = runs
+    if anchor:
+        idx = next((i for i, r in enumerate(runs) if r.id == anchor), -1)
+        if idx >= 0:
+            recent_runs = runs[idx + 1 :]
+
+    if not recent_runs:
+        return await get_canvas_memory(canvas_id, user=user, session=session)
+
+    keep_tail = 1 if len(recent_runs) >= 2 else 0
+    to_compact = recent_runs[:-keep_tail] if keep_tail else recent_runs
+    tail_runs = recent_runs[-keep_tail:] if keep_tail else []
+    prev_summary = memory.compacted_summary if memory else ""
+    rejected = list(memory.rejected_feedback or []) if memory else []
+
+    turn_lines = [
+        f"- 目标: {r.goal[:80]} | 结果: {(r.summary or '已完成')[:100]}"
+        for r in to_compact
+    ]
+    new_core = prev_summary
+    if payload.llm_mode == "real" and cfg is not None:
+        chat_provider = OpenAICompatibleChatProvider()
+        try:
+            compacted_res = await chat_provider.complete_json(
+                base_url=cfg.base_url,
+                api_key=decrypt_secret(cfg.encrypted_api_key, request.app.state.settings),
+                model=cfg.model_name,
+                system=(
+                    "你是 FlowCanvas Harness Memory Compactor。"
+                    "请把给定历史轮次与现有 core_memory 蒸馏为 400 字以内中文核心记忆，"
+                    '仅返回 JSON：{"core_memory":"..."}。'
+                ),
+                user=json.dumps(
+                    {
+                        "previous_core_memory": prev_summary,
+                        "rejected_patterns": rejected,
+                        "turns": turn_lines,
+                    },
+                    ensure_ascii=False,
+                ),
+                max_output_tokens=800,
+                token_limit_field=request.app.state.settings.chat_completion_token_limit_field,
+            )
+            new_core = str(compacted_res.content.get("core_memory") or "").strip()
+        except ProviderError:
+            new_core = ""
+    if not new_core:
+        merged = [seg for seg in (prev_summary, *turn_lines) if seg]
+        if rejected:
+            merged.append("已否决方向：" + "；".join(rejected[-3:]))
+        new_core = "\n".join(merged)[-900:]
+
+    tail_chars = sum(len(r.goal) + len(r.summary or "") for r in tail_runs)
+    est_tokens = (len(new_core) + tail_chars) // 3
+    if memory is None:
+        memory = CanvasMemory(
+            owner_id=user.id,
+            canvas_id=canvas_id,
+            compacted_summary=new_core,
+            compacted_run_count=len(to_compact),
+            last_compacted_run_id=to_compact[-1].id,
+            estimated_tokens=est_tokens,
+            rejected_feedback=rejected,
+        )
+        session.add(memory)
+    else:
+        memory.compacted_summary = new_core
+        memory.compacted_run_count = (memory.compacted_run_count or 0) + len(to_compact)
+        memory.last_compacted_run_id = to_compact[-1].id
+        memory.estimated_tokens = est_tokens
+    await session.commit()
+    return CanvasMemoryOut(
+        compacted_summary=memory.compacted_summary,
+        compacted_run_count=memory.compacted_run_count,
+        recent_run_count=len(tail_runs),
+        estimated_tokens=est_tokens,
+        max_context_tokens=max_tokens,
+        compaction_threshold_tokens=int(max_tokens * 0.65),
+        rejected_feedback=rejected,
     )
 
 

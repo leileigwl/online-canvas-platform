@@ -82,6 +82,18 @@ export const IMAGE_PROVIDER_PRESETS: Record<ImageProviderType, ImageProviderPres
       { id: "black-forest-labs/FLUX.1-dev", label: "FLUX.1-dev" },
     ],
   },
+  mock: {
+    provider: "mock",
+    title: "Mock Studio（内置测试生图接口 · 免 Key）",
+    baseUrl: "https://mock.flowcanvas.local/v1",
+    defaultModel: "mock-studio-v1",
+    keyPlaceholder: "内置测试适配器无需密钥（留空即可）",
+    hint: "保留用于 Agent 循环、排版碰撞检测与 Harness 长期记忆联调的内置生图适配器，按选定比例实时生成带 Prompt 摘要的 PNG 存入私有存储。",
+    models: [
+      { id: "mock-studio-v1", label: "Mock Studio v1 (快速构图测试)" },
+      { id: "mock-studio-editorial", label: "Mock Studio Editorial" },
+    ],
+  },
 };
 
 export const IMAGE_PROVIDER_ORDER: ImageProviderType[] = [
@@ -90,6 +102,7 @@ export const IMAGE_PROVIDER_ORDER: ImageProviderType[] = [
   "dashscope",
   "volcengine-ark",
   "siliconflow",
+  "mock",
 ];
 
 export type SelectableImageOption = {

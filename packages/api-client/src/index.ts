@@ -115,6 +115,7 @@ export type HarnessRunOptions = {
   lab_scenario?: "normal" | "collision_repair" | "memory_compaction";
   force_compact?: boolean;
   max_repair_rounds?: number;
+  compaction_threshold_pct?: number;
 };
 
 export type LayoutIssue = {
@@ -191,10 +192,30 @@ export type HarnessInspectResult = {
   canvas_id: string;
   revision: number;
   item_count: number;
+  active_model?: {
+    configured: boolean;
+    model_name: string;
+    base_url: string;
+    role_models: Record<string, string>;
+    max_context_tokens: number;
+  };
   canvas_brief: Array<Record<string, unknown>>;
+  recent_turns?: Array<{
+    id: string;
+    goal: string;
+    status: string;
+    summary: string;
+    model_calls_used: number;
+    completion_tokens_used: number;
+    decision: string;
+  }>;
   token_breakdown: {
-    memory_estimated_tokens: number;
+    system_prompts_tokens?: number;
     canvas_brief_tokens: number;
+    core_memory_tokens?: number;
+    recent_turns_tokens?: number;
+    live_run_tokens?: number;
+    memory_estimated_tokens: number;
     total_estimated_tokens: number;
     compaction_threshold_tokens: number;
     max_context_tokens: number;

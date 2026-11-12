@@ -133,23 +133,39 @@ class OpenAICompatibleChatProvider:
             raise ProviderError("模型输出长度参数配置无效")
         try:
             safe_url = await asyncio.to_thread(validate_public_https_url, base_url)
-            async with build_safe_async_client(timeout=60) as client:
-                payload = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.2,
-                }
-                payload[token_limit_field] = max_output_tokens
-                response = await client.post(
-                    f"{safe_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json=payload,
-                )
-                response.raise_for_status()
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2,
+            }
+            payload[token_limit_field] = max_output_tokens
+            async with build_safe_async_client(timeout=90) as client:
+                response: httpx.Response | None = None
+                for attempt in range(2):
+                    try:
+                        response = await client.post(
+                            f"{safe_url}/chat/completions",
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            json=payload,
+                        )
+                        response.raise_for_status()
+                        break
+                    except httpx.HTTPStatusError as error:
+                        status_code = error.response.status_code
+                        if attempt == 0 and (status_code == 429 or status_code >= 500):
+                            await asyncio.sleep(1.0)
+                            continue
+                        raise
+                    except (httpx.TimeoutException, httpx.TransportError):
+                        if attempt == 0:
+                            await asyncio.sleep(1.0)
+                            continue
+                        raise
+                assert response is not None
                 body = response.json()
                 content = body["choices"][0]["message"]["content"]
                 usage = body.get("usage") or {}

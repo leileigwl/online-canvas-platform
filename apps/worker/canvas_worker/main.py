@@ -54,8 +54,8 @@ COORDINATOR_PROMPT = "\n".join(
         ),
         "按顺序使用 task-1、task-2、task-3 作为 id；依赖只填写已有的前置子任务 id。",
         (
-            "将可独立完成的工作拆开，让 Canvas Editor 并行处理；"
-            "如先生成新图再排版的任务用 depends_on 声明先后。"
+            "文字说明卡片请用 add_note/add_text 工具，勿当作生图任务。"
+            "新生成对象需直接确定最终无重叠坐标，不要再额外拆出『移动新生成对象』的后置任务。"
         ),
         "参考当前画布和用户授权的参考图片元数据，不编造图片内容。",
         (
@@ -84,14 +84,18 @@ PLANNER_PROMPT = "\n".join(
             '"plans":[{"task_id":"task-1","plan":"具体布局、文案或生图建议"}]}。'
         ),
         "每个输入子任务必须且只能对应一个方案，task_id 必须原样返回。",
-        "对齐任务只需局部围绕目标对象整理（align_objects），绝不整体打乱无关元素。",
+        (
+            "对齐/移动工具仅能针对当前画布已存在对象；若无明确要求不要挪动现有画笔涂鸦。"
+            "新增图片与说明便签（add_note）请从上下文 layout_anchors.right_clear_x "
+            "开始由左向右间隔 >=32px 排布。"
+        ),
     )
 )
 EDITOR_PROMPT = "\n".join(
     (
         (
-            "你是 FlowCanvas Canvas Editor。根据分配的子任务和 Planner 方案，"
-            "提出最多 12 个受白名单校验的画布工具操作。"
+            "你是 FlowCanvas Canvas Editor。只负责完成当前分配给你的单个 subtask，"
+            "严格不得替其他 subtask 生成重复图片或挪动无关对象，提出最多 12 个画布工具操作。"
         ),
         (
             '只返回 JSON：{"thinking":"简短执行思考",'
@@ -102,7 +106,8 @@ EDITOR_PROMPT = "\n".join(
             "align_objects, add_shape, generate_image, edit_image。"
         ),
         (
-            "关键参数：add_note(title,content,x,y,width,height)；"
+            "关键参数（严禁多传未知字段）："
+            "add_note(title,content,x,y,width,height)；"
             "add_text(content,x,y,width,height,font_family,font_size,color)；"
         ),
         (
@@ -112,11 +117,16 @@ EDITOR_PROMPT = "\n".join(
         (
             "add_shape(shape_kind,title,x,y,width,height,color)；"
             "generate_image(prompt,x,y,width,height,aspect_ratio,reference_object_ids)；"
+            "edit_image(prompt,reference_object_ids,x,y,width,height,aspect_ratio)。"
         ),
-        "edit_image(prompt,reference_object_ids,x,y,width,height,aspect_ratio)。",
         (
-            "所有 object_id 必须来自当前画布中真实存在的 id；不得输出 URL、base64 "
-            "或未登记工具。信息不足时返回空 operations。"
+            "aspect_ratio 可选: auto,1:1,2:3,3:2,4:3,3:4,4:5,5:4,16:9,9:16,21:9,9:21。"
+            "说明/注释卡片请直接用 add_note，勿用 generate_image。"
+        ),
+        (
+            "坐标放置必须避开 layout_anchors.existing_bounds 以及 already_placed_this_round"
+            "（若提供 suggested_next_x，请优先从 suggested_next_x 起放置）。"
+            "所有 object_id 必须来自 canvas 中真实已存在的 id；不得输出 URL、base64 或未登记工具。"
         ),
     )
 )
@@ -124,12 +134,19 @@ REVIEWER_PROMPT = "\n".join(
     (
         (
             "你是 FlowCanvas Reviewer。结合确定性几何校验报告（verifier_report）、"
-            "用户目标与 Planner 方案，审核本次提案。"
+            "用户目标、layout_anchors 与 Planner 方案，审核本次提案。"
         ),
         '只返回 JSON：{"approved":true,"thinking":"审阅要点","feedback":"简短中文审阅意见"}。',
         (
-            "若 verifier_report.passed 为 false，或存在坐标重叠、越界、偏离用户目标、"
-            "越权移动无关对象等问题，必须返回 approved=false 并给出可执行的修改意见。"
+            "裁决分工原则：verifier_report 是坐标重叠、最小间距与画布边界的唯一权威裁决。"
+            "当 verifier_report.passed 为 true 时，严禁主观猜测“可能重叠/越界”而驳回，"
+            "你只需检查是否偏离用户目标、文案/提示词质量、以及是否越权移动或删改无关已有对象；"
+            "若语义与范围均合理，必须返回 approved=true。"
+        ),
+        (
+            "仅当 verifier_report.passed 为 false，或明显偏离用户目标、"
+            "越权移动/改动无关对象、生成内容严重违背要求时，"
+            "返回 approved=false 并给出可执行的修改意见。"
         ),
     )
 )
@@ -824,6 +841,9 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         lab_scenario = str(harness_options.get("lab_scenario") or "normal")
         force_compact = bool(harness_options.get("force_compact", False))
         max_repair_rounds = max(0, min(3, int(harness_options.get("max_repair_rounds", 2))))
+        compaction_threshold_pct = max(
+            5, min(90, int(harness_options.get("compaction_threshold_pct", 65)))
+        )
         completion_tokens_per_call = run.completion_tokens_per_call
         model_config = await session.scalar(
             select(ModelConfig).where(ModelConfig.owner_id == run.owner_id)
@@ -938,7 +958,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     AgentRun.owner_id == owner_id,
                     AgentRun.canvas_id == canvas_uuid,
                     AgentRun.id != run_uuid,
-                    AgentRun.status == RunStatus.SUCCEEDED,
+                    AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
                 )
                 .order_by(AgentRun.created_at.asc())
             )
@@ -953,17 +973,43 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
     rejected_patterns = list(memory.rejected_feedback or []) if memory else []
     recent_payload = [_summarize_turn(r) for r in recent_runs]
     canvas_brief = _canvas_summary(canvas_items)
-    approx_tokens = (
-        len(compacted_summary)
-        + len(json.dumps(recent_payload, ensure_ascii=False))
-        + len(json.dumps(canvas_brief, ensure_ascii=False))
+    visible_boxes = [
+        it
+        for it in canvas_brief
+        if isinstance(it.get("x"), (int, float))
+        and isinstance(it.get("y"), (int, float))
+        and isinstance(it.get("width"), (int, float))
+        and isinstance(it.get("height"), (int, float))
+    ]
+    if visible_boxes:
+        min_x = round(min(float(it["x"]) for it in visible_boxes), 1)
+        min_y = round(min(float(it["y"]) for it in visible_boxes), 1)
+        max_x = round(max(float(it["x"]) + float(it["width"]) for it in visible_boxes), 1)
+        max_y = round(max(float(it["y"]) + float(it["height"]) for it in visible_boxes), 1)
+    else:
+        min_x, min_y, max_x, max_y = 0.0, 0.0, 0.0, 0.0
+    layout_anchors = {
+        "existing_bounds": {"min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y},
+        "right_clear_x": round(max_x + 48, 1) if visible_boxes else -160.0,
+        "suggested_y": round(max(-160.0, min(min_y, 0.0)), 1) if visible_boxes else -120.0,
+        "below_clear_y": round(max_y + 48, 1) if visible_boxes else 160.0,
+    }
+    system_prompts_tokens = 620
+    canvas_tokens = len(json.dumps(canvas_brief, ensure_ascii=False)) // 3
+    core_memory_tokens = (
+        len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
     ) // 3
-    compact_threshold = int(max_context_tokens * 0.65)
+    recent_turns_tokens = len(json.dumps(recent_payload, ensure_ascii=False)) // 3
+    approx_tokens = (
+        system_prompts_tokens + canvas_tokens + core_memory_tokens + recent_turns_tokens
+    )
+    compact_threshold = int(max_context_tokens * (compaction_threshold_pct / 100.0))
 
     user_context = {
         "goal": goal,
         "context_revision": context_revision,
         "canvas": canvas_brief,
+        "layout_anchors": layout_anchors,
         "authorized_reference_image_metadata": references,
         "harness_memory": {
             "core_summary": compacted_summary,
@@ -1059,13 +1105,23 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         materialized_cache[cache_key] = result_meta
         return {**operation, "result": result_meta}
 
-    async def call_model(*, model: str, system: str, user: str) -> dict:
+    async def call_model_with_meta(*, model: str, system: str, user: str) -> tuple[dict, dict]:
         # Reserve before contacting the provider so ARQ retries and Worker restarts
         # consume the same durable per-run allowance.
         await _reserve_agent_model_call(session_factory, run_uuid)
+        started_at = asyncio.get_running_loop().time()
 
         if llm_mode == "scripted" or model_config_data is None:
-            return _scripted_model_response(system=system, user=user, lab_scenario=lab_scenario)
+            content = _scripted_model_response(
+                system=system, user=user, lab_scenario=lab_scenario
+            )
+            elapsed_ms = max(1, round((asyncio.get_running_loop().time() - started_at) * 1000))
+            return content, {
+                "model": "scripted-harness",
+                "prompt_tokens": len(system + user) // 3,
+                "completion_tokens": len(json.dumps(content, ensure_ascii=False)) // 3,
+                "duration_ms": elapsed_ms,
+            }
 
         response = await provider.complete_json(
             base_url=model_config_data["base_url"],
@@ -1076,6 +1132,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             max_output_tokens=completion_tokens_per_call,
             token_limit_field=settings.chat_completion_token_limit_field,
         )
+        elapsed_ms = max(1, round((asyncio.get_running_loop().time() - started_at) * 1000))
         if response.completion_tokens is not None:
             async with session_factory() as session:
                 recorded = await session.execute(
@@ -1093,7 +1150,59 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     raise RunCanceled
             if response.completion_tokens > completion_tokens_per_call:
                 raise ProviderError("模型服务返回内容超过单次输出 token 上限")
-        return response.content
+        return response.content, {
+            "model": model,
+            "prompt_tokens": response.prompt_tokens or (len(system + user) // 3),
+            "completion_tokens": response.completion_tokens
+            or (len(json.dumps(response.content, ensure_ascii=False)) // 3),
+            "duration_ms": elapsed_ms,
+        }
+
+    async def call_model(*, model: str, system: str, user: str) -> dict:
+        content, _ = await call_model_with_meta(model=model, system=system, user=user)
+        return content
+
+    def _emit_context_snapshot(writer: StreamWriter, *, phase: str, compacted: bool) -> None:
+        current_core_tokens = (
+            len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
+        ) // 3
+        current_recent_tokens = (
+            len(json.dumps(user_context["harness_memory"]["recent_turns"], ensure_ascii=False))
+            // 3
+        )
+        total_tok = (
+            system_prompts_tokens + canvas_tokens + current_core_tokens + current_recent_tokens
+        )
+        writer(
+            {
+                "kind": "context",
+                "role": "Harness Context",
+                "phase": phase,
+                "compacted": compacted,
+                "title": (
+                    f"上下文快照（{phase} · {total_tok}/{max_context_tokens} tokens）"
+                ),
+                "text": (
+                    f"系统提示 ~{system_prompts_tokens} · 画布对象 ~{canvas_tokens} · "
+                    f"核心记忆 ~{core_memory_tokens} · 近期轮次 ~{recent_turns_tokens} tok"
+                ).replace(
+                    f"核心记忆 ~{core_memory_tokens}", f"核心记忆 ~{current_core_tokens}"
+                ).replace(
+                    f"近期轮次 ~{recent_turns_tokens}", f"近期轮次 ~{current_recent_tokens}"
+                ),
+                "breakdown": {
+                    "system_prompts_tokens": system_prompts_tokens,
+                    "canvas_brief_tokens": canvas_tokens,
+                    "core_memory_tokens": current_core_tokens,
+                    "recent_turns_tokens": current_recent_tokens,
+                    "total_estimated_tokens": total_tok,
+                    "compaction_threshold_tokens": compact_threshold,
+                    "compaction_threshold_pct": compaction_threshold_pct,
+                    "max_context_tokens": max_context_tokens,
+                },
+                "memory_preview": user_context["harness_memory"],
+            }
+        )
 
     async def _maybe_compact_harness_memory(writer: StreamWriter) -> None:
         nonlocal compacted_summary, approx_tokens
@@ -1182,6 +1291,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             "rejected_patterns": rejected_patterns,
             "recent_turns": tail_payload,
         }
+        _emit_context_snapshot(writer, phase="记忆压缩后", compacted=True)
 
     async def set_task_state(sequence: int, status: RunStatus, output: dict | None = None) -> bool:
         async with task_state_lock:
@@ -1195,6 +1305,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         if output is None:
             if not await set_task_state(0, RunStatus.RUNNING):
                 raise RunCanceled
+            _emit_context_snapshot(writer, phase="初始注入", compacted=False)
             await _maybe_compact_harness_memory(writer)
             writer(
                 {
@@ -1204,7 +1315,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     "text": f"正在分析目标「{goal[:80]}」与当前 {len(canvas_items)} 个画布对象...",
                 }
             )
-            response = await call_model(
+            response, coord_meta = await call_model_with_meta(
                 model=_model_for_role(model_config_data, "Coordinator"),
                 system=COORDINATOR_PROMPT,
                 user=json.dumps(user_context, ensure_ascii=False),
@@ -1220,7 +1331,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                         "text": thinking[:400],
                     }
                 )
-            output = {"summary": summary, "subtasks": subtasks}
+            output = {"summary": summary, "subtasks": subtasks, "_meta": coord_meta}
             if not await set_task_state(0, RunStatus.SUCCEEDED, output):
                 raise RunCanceled
         summary, subtasks = _validate_subtasks(output)
@@ -1250,7 +1361,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     "text": f"正在为 {len(state['subtasks'])} 个子任务规划坐标与视觉策略...",
                 }
             )
-            response = await call_model(
+            response, plan_meta = await call_model_with_meta(
                 model=_model_for_role(model_config_data, "Planner"),
                 system=PLANNER_PROMPT,
                 user=json.dumps(
@@ -1268,7 +1379,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                         "text": thinking[:400],
                     }
                 )
-            output = {"plans": plans}
+            output = {"plans": plans, "_meta": plan_meta}
             if not await set_task_state(1, RunStatus.SUCCEEDED, output):
                 raise RunCanceled
         saved_plans = [{"task_id": key, "plan": value} for key, value in output["plans"].items()]
@@ -1279,6 +1390,22 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         attempt = int(state.get("attempt") or 0)
         review_feedback = str(state.get("review_feedback") or "")
         verifier_issues = list((state.get("verifier_report") or {}).get("issues") or [])
+        prior_round_by_task = dict(state.get("editor_outputs") or {})
+        placed_this_round: list[dict] = []
+
+        def _record_placed(ops_list: list[dict]) -> None:
+            for op in ops_list:
+                p = op.get("params") or {}
+                if "x" in p and "y" in p:
+                    placed_this_round.append(
+                        {
+                            "tool": op["tool"],
+                            "x": p.get("x"),
+                            "y": p.get("y"),
+                            "width": p.get("width", 220),
+                            "height": p.get("height", 140),
+                        }
+                    )
 
         async def run_editor(
             task: dict,
@@ -1294,6 +1421,15 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 return task["id"], operations
             if not await set_task_state(sequence, RunStatus.RUNNING):
                 raise RunCanceled
+            right_x = float(layout_anchors["right_clear_x"])
+            if placed_this_round:
+                right_x = max(
+                    right_x,
+                    max(
+                        float(b["x"]) + float(b["width"]) + 32
+                        for b in placed_this_round
+                    ),
+                )
             edit_context = {
                 **user_context,
                 "subtask": task,
@@ -1301,11 +1437,14 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 "attempt": attempt,
                 "review_feedback": review_feedback,
                 "verifier_issues": verifier_issues,
+                "my_previous_operations": prior_round_by_task.get(task["id"], []),
+                "already_placed_this_round": list(placed_this_round),
+                "suggested_next_x": round(right_x, 1),
                 "completed_dependency_operations": {
                     dep: prior_outputs.get(dep, []) for dep in task["depends_on"]
                 },
             }
-            response = await call_model(
+            response, editor_meta = await call_model_with_meta(
                 model=_model_for_role(model_config_data, "Canvas Editor"),
                 system=EDITOR_PROMPT,
                 user=json.dumps(edit_context, ensure_ascii=False),
@@ -1320,7 +1459,31 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                         "text": thinking[:400],
                     }
                 )
-            operations = validate_plan(response.get("operations", []), canvas_items)
+            try:
+                operations = validate_plan(response.get("operations", []), canvas_items)
+            except PlanValidationError as schema_err:
+                writer(
+                    {
+                        "kind": "thinking",
+                        "role": "Canvas Editor",
+                        "title": f"{task['title']}（参数自修复重试）",
+                        "text": (
+                            f"工具参数未通过白名单校验：{schema_err}，"
+                            "正携带精确错误信息原地重写..."
+                        ),
+                    }
+                )
+                repair_ctx = {
+                    **edit_context,
+                    "schema_repair_error": str(schema_err),
+                    "previous_invalid_operations": response.get("operations"),
+                }
+                response, editor_meta = await call_model_with_meta(
+                    model=_model_for_role(model_config_data, "Canvas Editor"),
+                    system=EDITOR_PROMPT,
+                    user=json.dumps(repair_ctx, ensure_ascii=False),
+                )
+                operations = validate_plan(response.get("operations", []), canvas_items)
             finalized_ops: list[dict] = []
             for op in operations:
                 spec = TOOL_SPECS[op["tool"]]
@@ -1359,7 +1522,11 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             if not await set_task_state(
                 sequence,
                 RunStatus.SUCCEEDED,
-                {"operation_count": len(finalized_ops), "operations": finalized_ops},
+                {
+                    "operation_count": len(finalized_ops),
+                    "operations": finalized_ops,
+                    "_meta": editor_meta,
+                },
             ):
                 raise RunCanceled
             return task["id"], finalized_ops
@@ -1369,16 +1536,27 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         }
         editor_outputs: dict[str, list[dict]] = {}
         for wave in _editor_waves(state["subtasks"]):
-            results = await asyncio.gather(
-                *(run_editor(task, task_sequences[task["id"]], editor_outputs) for task in wave),
-                return_exceptions=True,
-            )
-            errors = [result for result in results if isinstance(result, BaseException)]
-            if errors:
-                raise errors[0]
-            editor_outputs.update(
-                dict(result for result in results if not isinstance(result, BaseException))
-            )
+            if attempt > 0 and len(wave) > 1:
+                for task in wave:
+                    tid, task_ops = await run_editor(
+                        task, task_sequences[task["id"]], editor_outputs
+                    )
+                    editor_outputs[tid] = task_ops
+                    _record_placed(task_ops)
+            else:
+                results = await asyncio.gather(
+                    *(
+                        run_editor(task, task_sequences[task["id"]], editor_outputs)
+                        for task in wave
+                    ),
+                    return_exceptions=True,
+                )
+                errors = [result for result in results if isinstance(result, BaseException)]
+                if errors:
+                    raise errors[0]
+                for tid, task_ops in results:  # type: ignore[misc]
+                    editor_outputs[tid] = task_ops
+                    _record_placed(task_ops)
 
         operations = []
         mutated_ids: set[str] = set()
@@ -1456,7 +1634,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             "operations": state["operations"],
             "verifier_report": verifier_report,
         }
-        response = await call_model(
+        response, review_meta = await call_model_with_meta(
             model=_model_for_role(model_config_data, "Reviewer"),
             system=REVIEWER_PROMPT,
             user=json.dumps(review_context, ensure_ascii=False),
@@ -1471,7 +1649,10 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 str(it.get("message") or "") + " " + str(it.get("suggestion") or "")
                 for it in (verifier_report.get("issues") or [])[:3]
             ).strip()
-            if issue_text and issue_text not in feedback:
+            if issue_text and not any(
+                str(it.get("message") or "")[:12] in feedback
+                for it in (verifier_report.get("issues") or [])[:1]
+            ):
                 feedback = f"{feedback} {issue_text}".strip()
 
         next_history = [
@@ -1512,6 +1693,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             "needs_manual_review": not bool(approved),
             "feedback": feedback[:500],
             "verifier_issues": verifier_report.get("issues") or [],
+            "_meta": review_meta,
         }
         if not await set_task_state(sequence, RunStatus.SUCCEEDED, review_summary):
             raise RunCanceled

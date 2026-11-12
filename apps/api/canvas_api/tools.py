@@ -65,7 +65,9 @@ class GenerateImageParams(_StrictToolParams):
     y: float = Field(default=0, ge=-1_000_000, le=1_000_000)
     width: float = Field(default=260, gt=32, le=2000)
     height: float = Field(default=260, gt=32, le=2000)
-    aspect_ratio: Literal["auto", "1:1", "3:4", "4:3", "16:9", "9:16"] = "auto"
+    aspect_ratio: Literal[
+        "auto", "1:1", "2:3", "3:2", "4:3", "3:4", "4:5", "5:4", "16:9", "9:16", "21:9", "9:21"
+    ] = "auto"
     reference_object_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
@@ -76,7 +78,9 @@ class EditImageParams(_StrictToolParams):
     y: float = Field(default=0, ge=-1_000_000, le=1_000_000)
     width: float = Field(default=260, gt=32, le=2000)
     height: float = Field(default=260, gt=32, le=2000)
-    aspect_ratio: Literal["auto", "1:1", "3:4", "4:3", "16:9", "9:16"] = "auto"
+    aspect_ratio: Literal[
+        "auto", "1:1", "2:3", "3:2", "4:3", "3:4", "4:5", "5:4", "16:9", "9:16", "21:9", "9:21"
+    ] = "auto"
 
 
 @dataclass(frozen=True)
@@ -143,9 +147,21 @@ def validate_plan(
         if spec is None:
             raise PlanValidationError(f"提案包含未登记的画布操作: {name}")
         try:
-            params = spec.params.model_validate(operation.get("params", {})).model_dump(mode="json")
+            raw_params = operation.get("params", {})
+            if isinstance(raw_params, dict):
+                raw_params = dict(raw_params)
+                if raw_params.get("reference_object_ids") is None and name in {
+                    "generate_image",
+                    "edit_image",
+                }:
+                    raw_params.pop("reference_object_ids", None)
+            params = spec.params.model_validate(raw_params).model_dump(mode="json")
         except ValidationError as error:
-            raise PlanValidationError("提案参数不符合画布操作规范") from error
+            first_err = error.errors()[0] if error.errors() else {}
+            loc = ".".join(str(part) for part in first_err.get("loc", []))
+            msg = str(first_err.get("msg") or "参数校验失败")
+            hint = f"{name}.{loc}: {msg}" if loc else f"{name}: {msg}"
+            raise PlanValidationError(f"提案参数不符合画布操作规范（{hint[:160]}）") from error
 
         if name in {"move_object", "resize_object"} and params["object_id"] not in items_by_id:
             raise PlanValidationError("操作引用了当前画布中不存在的对象")

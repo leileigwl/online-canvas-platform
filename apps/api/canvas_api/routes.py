@@ -2243,7 +2243,7 @@ async def get_canvas_memory(
             .where(
                 AgentRun.owner_id == user.id,
                 AgentRun.canvas_id == canvas_id,
-                AgentRun.status == RunStatus.SUCCEEDED,
+                AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
             )
             .order_by(AgentRun.created_at.asc())
         )
@@ -2338,6 +2338,31 @@ async def inspect_canvas_harness(
 
     layout_report = verify_proposal_layout(items, validated_ops)
     mem_out = await get_canvas_memory(canvas_id, user=user, session=session)
+    cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    all_runs = list(
+        await session.scalars(
+            select(AgentRun)
+            .where(
+                AgentRun.owner_id == user.id,
+                AgentRun.canvas_id == canvas_id,
+                AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
+            )
+            .order_by(AgentRun.created_at.desc())
+            .limit(12)
+        )
+    )
+    memory_row = await session.scalar(
+        select(CanvasMemory).where(
+            CanvasMemory.owner_id == user.id, CanvasMemory.canvas_id == canvas_id
+        )
+    )
+    anchor = memory_row.last_compacted_run_id if memory_row else None
+    asc_runs = list(reversed(all_runs))
+    if anchor:
+        idx = next((i for i, r in enumerate(asc_runs) if r.id == anchor), -1)
+        if idx >= 0:
+            asc_runs = asc_runs[idx + 1 :]
+
     canvas_brief = [
         {
             "id": it.get("id"),
@@ -2350,24 +2375,68 @@ async def inspect_canvas_harness(
         }
         for it in items
     ]
+    recent_turns_preview = [
+        {
+            "id": str(r.id),
+            "goal": r.goal[:120],
+            "status": r.status.value if isinstance(r.status, RunStatus) else r.status,
+            "summary": (r.summary or r.error or "")[:140],
+            "model_calls_used": r.model_calls_used,
+            "completion_tokens_used": r.completion_tokens_used,
+            "decision": (
+                "reverted"
+                if (r.proposal or {}).get("reverted")
+                else "rejected"
+                if (r.proposal or {}).get("rejected")
+                else "applied"
+                if (r.proposal or {}).get("applied")
+                else ("failed" if r.status == RunStatus.FAILED else "proposed")
+            ),
+        }
+        for r in asc_runs
+    ]
+    # Approximate token buckets aligned with Anthropic / Claude Code /context breakdown
+    system_prompts_tokens = 620
     brief_tokens = len(json.dumps(canvas_brief, ensure_ascii=False)) // 3
+    core_memory_tokens = (
+        len(mem_out.compacted_summary)
+        + len(json.dumps(mem_out.rejected_feedback, ensure_ascii=False))
+    ) // 3
+    recent_turns_tokens = len(json.dumps(recent_turns_preview, ensure_ascii=False)) // 3
+    latest_run = all_runs[0] if all_runs else None
+    live_run_tokens = latest_run.completion_tokens_used if latest_run else 0
+    total_tokens = (
+        system_prompts_tokens
+        + brief_tokens
+        + core_memory_tokens
+        + recent_turns_tokens
+        + live_run_tokens
+    )
     return {
         "canvas_id": str(canvas.id),
         "revision": canvas.revision,
         "item_count": len(items),
+        "active_model": {
+            "configured": cfg is not None,
+            "model_name": cfg.model_name if cfg else "scripted-harness",
+            "base_url": cfg.base_url if cfg else "",
+            "role_models": (cfg.role_models or {}) if cfg else {},
+            "max_context_tokens": mem_out.max_context_tokens,
+        },
         "canvas_brief": canvas_brief,
+        "recent_turns": recent_turns_preview,
         "token_breakdown": {
-            "memory_estimated_tokens": mem_out.estimated_tokens,
+            "system_prompts_tokens": system_prompts_tokens,
             "canvas_brief_tokens": brief_tokens,
-            "total_estimated_tokens": mem_out.estimated_tokens + brief_tokens,
+            "core_memory_tokens": core_memory_tokens,
+            "recent_turns_tokens": recent_turns_tokens,
+            "live_run_tokens": live_run_tokens,
+            "memory_estimated_tokens": mem_out.estimated_tokens,
+            "total_estimated_tokens": total_tokens,
             "compaction_threshold_tokens": mem_out.compaction_threshold_tokens,
             "max_context_tokens": mem_out.max_context_tokens,
             "utilization_pct": round(
-                min(
-                    100.0,
-                    ((mem_out.estimated_tokens + brief_tokens) / max(1, mem_out.max_context_tokens))
-                    * 100,
-                ),
+                min(100.0, (total_tokens / max(1, mem_out.max_context_tokens)) * 100),
                 1,
             ),
         },
@@ -2398,7 +2467,7 @@ async def compact_canvas_memory_now(
             .where(
                 AgentRun.owner_id == user.id,
                 AgentRun.canvas_id == canvas_id,
-                AgentRun.status == RunStatus.SUCCEEDED,
+                AgentRun.status.in_((RunStatus.SUCCEEDED, RunStatus.FAILED)),
             )
             .order_by(AgentRun.created_at.asc())
         )
@@ -2420,7 +2489,10 @@ async def compact_canvas_memory_now(
     rejected = list(memory.rejected_feedback or []) if memory else []
 
     turn_lines = [
-        f"- 目标: {r.goal[:80]} | 结果: {(r.summary or '已完成')[:100]}"
+        (
+            f"- [{r.status.value if isinstance(r.status, RunStatus) else r.status}] "
+            f"目标: {r.goal[:80]} | 结果: {(r.summary or r.error or '已完成')[:100]}"
+        )
         for r in to_compact
     ]
     new_core = prev_summary

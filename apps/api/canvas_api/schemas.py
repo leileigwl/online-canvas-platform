@@ -370,6 +370,7 @@ class HarnessRunOptions(APIModel):
     lab_scenario: Literal["normal", "collision_repair", "memory_compaction"] = "normal"
     force_compact: bool = False
     max_repair_rounds: int = Field(default=2, ge=0, le=3)
+    compaction_threshold_pct: int = Field(default=65, ge=5, le=90)
 
 
 class HarnessInspectRequest(APIModel):

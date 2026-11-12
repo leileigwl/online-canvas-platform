@@ -2,7 +2,19 @@ import type { CanvasDocument, CanvasSnapshot, CanvasViewport } from "@canvas/can
 
 export type { CanvasDocument, CanvasSnapshot, CanvasViewport };
 
-export type User = { id: string; username: string };
+export type User = {
+  id: string;
+  username: string;
+  email?: string | null;
+  email_verified?: boolean;
+};
+export type EmailCodePurpose = "register" | "reset_password" | "bind_email";
+export type EmailCodeResult = {
+  sent: boolean;
+  expires_in_seconds: number;
+  cooldown_seconds: number;
+  message: string;
+};
 export type Project = { id: string; name: string; updated_at: string };
 export type CanvasVersion = {
   revision: number;
@@ -168,9 +180,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const message =
       typeof detail === "string"
         ? detail
-        : typeof detail === "object" && detail && "message" in detail
-          ? String(detail.message)
-          : response.statusText;
+        : Array.isArray(detail) &&
+            detail.length > 0 &&
+            typeof detail[0] === "object" &&
+            detail[0] &&
+            "msg" in detail[0]
+          ? String(detail[0].msg).replace(/^Value error,\s*/i, "")
+          : typeof detail === "object" && detail && "message" in detail
+            ? String(detail.message)
+            : response.statusText;
     throw new ApiError(response.status, message, detail);
   }
   return body as T;
@@ -181,18 +199,34 @@ const json = (value: unknown): string => JSON.stringify(value);
 export const api = {
   session: () => request<{ authenticated: boolean; user: User | null }>("/auth/session"),
   me: () => request<User>("/auth/me"),
-  login: (username: string, password: string) =>
-    request<User>("/auth/login", { method: "POST", body: json({ username, password }) }),
-  register: (username: string, password: string) =>
-    request<User>("/auth/register", { method: "POST", body: json({ username, password }) }),
+  sendEmailCode: (email: string, purpose: EmailCodePurpose) =>
+    request<EmailCodeResult>("/auth/email-code", {
+      method: "POST",
+      body: json({ email, purpose }),
+    }),
+  login: (identifier: string, password: string) =>
+    request<User>("/auth/login", { method: "POST", body: json({ identifier, password }) }),
+  register: (input: {
+    username: string;
+    email: string;
+    password: string;
+    verification_code: string;
+  }) => request<User>("/auth/register", { method: "POST", body: json(input) }),
+  resetPassword: (input: { email: string; verification_code: string; new_password: string }) =>
+    request<void>("/auth/password/reset", { method: "POST", body: json(input) }),
+  bindEmail: (email: string, verification_code: string) =>
+    request<User>("/auth/email/bind", {
+      method: "POST",
+      body: json({ email, verification_code }),
+    }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
   changePassword: (current_password: string, new_password: string) =>
     request<void>("/auth/password", {
       method: "PATCH",
       body: json({ current_password, new_password }),
     }),
-  deleteAccount: (username: string, password: string) =>
-    request<void>("/auth/account", { method: "DELETE", body: json({ username, password }) }),
+  deleteAccount: (identifier: string, password: string) =>
+    request<void>("/auth/account", { method: "DELETE", body: json({ identifier, password }) }),
 
   listProjects: () => request<Project[]>("/projects"),
   createProject: (name: string) =>

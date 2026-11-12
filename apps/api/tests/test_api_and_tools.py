@@ -5,6 +5,7 @@ import io
 import uuid
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -35,6 +36,35 @@ class _FakeImageProvider:
         return await self.generate(request)
 
 
+async def _register_with_code(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    username: str,
+    password: str,
+    email: str | None = None,
+) -> httpx.Response:
+    target_email = email or f"{username}@163.com"
+    sent: dict[str, str] = {}
+
+    async def _fake_send(_settings, *, to_email: str, code: str, purpose: str) -> None:
+        sent[f"{purpose}:{to_email}"] = code
+
+    monkeypatch.setattr("canvas_api.routes.send_verification_email", _fake_send)
+    code_res = await client.post(
+        "/api/auth/email-code", json={"email": target_email, "purpose": "register"}
+    )
+    assert code_res.status_code == 200
+    return await client.post(
+        "/api/auth/register",
+        json={
+            "username": username,
+            "email": target_email,
+            "password": password,
+            "verification_code": sent[f"register:{target_email}"],
+        },
+    )
+
+
 async def _make_test_app(tmp_path: Path) -> tuple[FastAPI, _FakeImageProvider]:
     settings = Settings(
         app_env="development",
@@ -51,16 +81,16 @@ async def _make_test_app(tmp_path: Path) -> tuple[FastAPI, _FakeImageProvider]:
 
 
 @pytest.mark.asyncio
-async def test_register_starter_canvas_versions_and_image_config(tmp_path: Path) -> None:
+async def test_register_starter_canvas_versions_and_image_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app, fake = await _make_test_app(tmp_path)
     async with app.router.lifespan_context(app):
         app.state.image_provider = fake
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # 1. Register creates starter project + canvas with welcome note
-            res = await client.post(
-                "/api/auth/register", json={"username": "creator_one", "password": "password123"}
-            )
+            res = await _register_with_code(client, monkeypatch, "creator_one", "password123")
             assert res.status_code == 201
             projects = (await client.get("/api/projects")).json()
             assert len(projects) == 1
@@ -150,15 +180,16 @@ async def test_register_starter_canvas_versions_and_image_config(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_generation_and_cross_user_isolation(tmp_path: Path) -> None:
+async def test_generation_and_cross_user_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app, fake = await _make_test_app(tmp_path)
     async with app.router.lifespan_context(app):
         app.state.image_provider = fake
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            await client.post(
-                "/api/auth/register", json={"username": "user_alpha", "password": "password123"}
-            )
+            reg_alpha = await _register_with_code(client, monkeypatch, "user_alpha", "password123")
+            assert reg_alpha.status_code == 201
             png = _make_png_bytes(48, 48)
             up = await client.post("/api/assets", files={"file": ("ref.png", png, "image/png")})
             assert up.status_code == 201
@@ -179,9 +210,8 @@ async def test_generation_and_cross_user_isolation(tmp_path: Path) -> None:
 
             # Second user must not read first user's asset
             async with AsyncClient(transport=transport, base_url="http://test") as other:
-                await other.post(
-                    "/api/auth/register", json={"username": "user_beta", "password": "password123"}
-                )
+                reg_beta = await _register_with_code(other, monkeypatch, "user_beta", "password123")
+                assert reg_beta.status_code == 201
                 deny = await other.get(f"/api/assets/{asset_id}/content")
                 assert deny.status_code == 404
 
@@ -263,10 +293,7 @@ async def test_multi_image_configs_crud_and_model_routing(
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            reg = await client.post(
-                "/api/auth/register",
-                json={"username": "multi_img_user", "password": "password123"},
-            )
+            reg = await _register_with_code(client, monkeypatch, "multi_img_user", "password123")
             assert reg.status_code == 201
 
             c1 = await client.post(

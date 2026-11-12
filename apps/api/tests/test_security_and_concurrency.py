@@ -43,8 +43,39 @@ def _clear_rate_buckets():
     reset_rate_limits()
 
 
+async def _register_with_code(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    username: str,
+    password: str,
+    email: str | None = None,
+) -> httpx.Response:
+    target_email = email or f"{username}@163.com"
+    sent: dict[str, str] = {}
+
+    async def _fake_send(_settings, *, to_email: str, code: str, purpose: str) -> None:
+        sent[f"{purpose}:{to_email}"] = code
+
+    monkeypatch.setattr("canvas_api.routes.send_verification_email", _fake_send)
+    code_res = await client.post(
+        "/api/auth/email-code", json={"email": target_email, "purpose": "register"}
+    )
+    assert code_res.status_code == 200
+    return await client.post(
+        "/api/auth/register",
+        json={
+            "username": username,
+            "email": target_email,
+            "password": password,
+            "verification_code": sent[f"register:{target_email}"],
+        },
+    )
+
+
 @pytest.mark.asyncio
-async def test_auth_rate_limit_oversized_password_and_cookie_delete(tmp_path: Path) -> None:
+async def test_auth_rate_limit_oversized_password_and_cookie_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     settings = Settings(
         app_env="development",
         app_secret_key="test-secret-key-at-least-thirty-two-chars",
@@ -60,10 +91,7 @@ async def test_auth_rate_limit_oversized_password_and_cookie_delete(tmp_path: Pa
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="https://test") as client:
-            reg = await client.post(
-                "/api/auth/register",
-                json={"username": "sec_user_1", "password": "password123"},
-            )
+            reg = await _register_with_code(client, monkeypatch, "sec_user_1", "password123")
             assert reg.status_code == 201
 
             # Oversized password rejected by schema max_length=128 before PBKDF2
@@ -97,7 +125,9 @@ async def test_auth_rate_limit_oversized_password_and_cookie_delete(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_upload_defense_ilike_escape_headers_and_account_delete(tmp_path: Path) -> None:
+async def test_upload_defense_ilike_escape_headers_and_account_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     settings = Settings(
         app_env="development",
         app_secret_key="test-secret-key-at-least-thirty-two-chars",
@@ -111,9 +141,8 @@ async def test_upload_defense_ilike_escape_headers_and_account_delete(tmp_path: 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            await client.post(
-                "/api/auth/register", json={"username": "up_user", "password": "password123"}
-            )
+            reg = await _register_with_code(client, monkeypatch, "up_user", "password123")
+            assert reg.status_code == 201
 
             # SVG payload masquerading as PNG must be rejected
             svg = await client.post(
@@ -217,7 +246,9 @@ async def test_ssrf_dns_rebinding_and_streaming_oom_guards(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_proposal_state_locks_idempotency_sse_and_redis_reconnect(tmp_path: Path) -> None:
+async def test_proposal_state_locks_idempotency_sse_and_redis_reconnect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     settings = Settings(
         app_env="development",
         app_secret_key="test-secret-key-at-least-thirty-two-chars",
@@ -231,9 +262,8 @@ async def test_proposal_state_locks_idempotency_sse_and_redis_reconnect(tmp_path
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            await client.post(
-                "/api/auth/register", json={"username": "race_user", "password": "password123"}
-            )
+            reg = await _register_with_code(client, monkeypatch, "race_user", "password123")
+            assert reg.status_code == 201
             proj = (await client.get("/api/projects")).json()[0]
             canvas = (await client.get(f"/api/projects/{proj['id']}/canvases")).json()[0]
             canvas_id = uuid.UUID(canvas["id"])

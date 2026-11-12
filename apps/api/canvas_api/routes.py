@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,7 +24,7 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +37,12 @@ from canvas_api.dependencies import (
     optional_user,
     resolve_user_from_token,
 )
+from canvas_api.email_service import (
+    EmailDeliveryError,
+    hash_email_code,
+    send_verification_email,
+    verify_email_code_digest,
+)
 from canvas_api.image_assets import persist_generated_images, resolve_user_image_provider
 from canvas_api.models import (
     AgentRun,
@@ -45,6 +52,7 @@ from canvas_api.models import (
     Canvas,
     CanvasMemory,
     CanvasVersion,
+    EmailVerificationCode,
     ImageModelConfig,
     ModelConfig,
     Project,
@@ -67,6 +75,7 @@ from canvas_api.schemas import (
     AgentTaskOut,
     ApplyProposal,
     AssetOut,
+    BindEmailRequest,
     CanvasCreate,
     CanvasDocument,
     CanvasMemoryOut,
@@ -75,6 +84,7 @@ from canvas_api.schemas import (
     CanvasSave,
     CanvasUpdate,
     CanvasVersionOut,
+    EmailCodeRequest,
     FavoriteUpdate,
     GenerationRequest,
     ImageModelConfigInput,
@@ -83,6 +93,7 @@ from canvas_api.schemas import (
     ModelConfigInput,
     ModelConfigOut,
     PasswordChange,
+    PasswordResetRequest,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
@@ -113,7 +124,56 @@ def _iso(value: datetime) -> str:
 
 
 def _user_out(user: User) -> UserOut:
-    return UserOut(id=user.id, username=user.username)
+    return UserOut(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        email_verified=bool(user.email and user.email_verified),
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+async def _verify_and_consume_email_code(
+    session: AsyncSession,
+    *,
+    email: str,
+    purpose: str,
+    code: str,
+    settings: Settings,
+) -> EmailVerificationCode:
+    row = await session.scalar(
+        select(EmailVerificationCode)
+        .where(
+            func.lower(EmailVerificationCode.email) == email.lower(),
+            EmailVerificationCode.purpose == purpose,
+            EmailVerificationCode.consumed_at.is_(None),
+        )
+        .order_by(EmailVerificationCode.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    now = datetime.now(UTC)
+    if row is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "邮箱验证码无效或尚未发送")
+    if _as_utc(row.expires_at) <= now:
+        row.consumed_at = now
+        await session.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "邮箱验证码已过期，请重新获取")
+    if row.attempts >= settings.email_code_max_attempts:
+        row.consumed_at = now
+        await session.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "验证码错误次数过多，请重新获取")
+    if not verify_email_code_digest(purpose, email, code, row.code_hash, settings):
+        row.attempts += 1
+        if row.attempts >= settings.email_code_max_attempts:
+            row.consumed_at = now
+        await session.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "邮箱验证码不正确")
+    row.consumed_at = now
+    return row
 
 
 async def _audit_event(
@@ -289,6 +349,122 @@ async def _create_session(
     _cookie(response, token, settings)
 
 
+@router.post("/auth/email-code")
+async def send_email_code(
+    payload: EmailCodeRequest,
+    request: Request,
+    actor: User | None = Depends(optional_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    settings: Settings = request.app.state.settings
+    email = payload.email.lower()
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_email_code_ip",
+        _client_ip(request),
+        limit=max(settings.auth_rate_limit_per_minute * 2, 20),
+    )
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_email_code",
+        f"{payload.purpose}:{email[:80]}",
+        limit=settings.auth_rate_limit_per_minute,
+    )
+
+    if payload.purpose == "bind_email":
+        if actor is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录后再绑定邮箱")
+        if actor.email and actor.email.lower() == email and actor.email_verified:
+            raise HTTPException(status.HTTP_409_CONFLICT, "当前账户已绑定该邮箱")
+
+    existing_email_user = await session.scalar(select(User).where(func.lower(User.email) == email))
+    if payload.purpose == "register" and existing_email_user is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册账户")
+    if (
+        payload.purpose == "bind_email"
+        and existing_email_user is not None
+        and actor is not None
+        and existing_email_user.id != actor.id
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已被其他账户绑定")
+    if payload.purpose == "reset_password" and (
+        existing_email_user is None or not existing_email_user.email_verified
+    ):
+        return {
+            "sent": True,
+            "expires_in_seconds": settings.email_code_ttl_seconds,
+            "cooldown_seconds": settings.email_code_cooldown_seconds,
+            "message": "如果该邮箱已绑定账户，验证码已发送至您的邮箱",
+        }
+
+    now = datetime.now(UTC)
+    latest_code = await session.scalar(
+        select(EmailVerificationCode)
+        .where(
+            func.lower(EmailVerificationCode.email) == email,
+            EmailVerificationCode.purpose == payload.purpose,
+        )
+        .order_by(EmailVerificationCode.created_at.desc())
+        .limit(1)
+    )
+    if latest_code is not None:
+        elapsed = (now - _as_utc(latest_code.created_at)).total_seconds()
+        if elapsed < settings.email_code_cooldown_seconds:
+            retry_after = max(1, int(settings.email_code_cooldown_seconds - elapsed))
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                f"发送过于频繁，请在 {retry_after} 秒后重试",
+            )
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    code_row = EmailVerificationCode(
+        email=email,
+        purpose=payload.purpose,
+        code_hash=hash_email_code(payload.purpose, email, code, settings),
+        attempts=0,
+        expires_at=now + timedelta(seconds=settings.email_code_ttl_seconds),
+    )
+    session.add(code_row)
+    await session.flush()
+    code_row_id = code_row.id
+    await session.commit()
+
+    try:
+        await send_verification_email(settings, to_email=email, code=code, purpose=payload.purpose)
+    except EmailDeliveryError as error:
+        await session.execute(
+            delete(EmailVerificationCode).where(EmailVerificationCode.id == code_row_id)
+        )
+        await session.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error)) from error
+
+    await session.execute(
+        update(EmailVerificationCode)
+        .where(
+            func.lower(EmailVerificationCode.email) == email,
+            EmailVerificationCode.purpose == payload.purpose,
+            EmailVerificationCode.id != code_row_id,
+            EmailVerificationCode.consumed_at.is_(None),
+        )
+        .values(consumed_at=now)
+    )
+    await _audit_event(
+        session,
+        actor.id if actor else None,
+        "auth.email_code_sent",
+        "email_verification",
+        str(code_row_id),
+        details={"purpose": payload.purpose, "domain": email.partition("@")[2]},
+    )
+    await session.commit()
+    return {
+        "sent": True,
+        "expires_in_seconds": settings.email_code_ttl_seconds,
+        "cooldown_seconds": settings.email_code_cooldown_seconds,
+        "message": "验证码已发送，请查收邮箱",
+    }
+
+
 @router.post("/auth/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def register(
     payload: UserCreate,
@@ -303,56 +479,77 @@ async def register(
         limit=request.app.state.settings.auth_rate_limit_per_minute,
     )
     username = payload.username.lower()
+    email = payload.email.lower()
     existing = await session.scalar(select(User.id).where(func.lower(User.username) == username))
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "用户名已被使用")
+    existing_email = await session.scalar(select(User.id).where(func.lower(User.email) == email))
+    if existing_email:
+        raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已注册账户")
+    await _verify_and_consume_email_code(
+        session,
+        email=email,
+        purpose="register",
+        code=payload.verification_code,
+        settings=request.app.state.settings,
+    )
     password_hash = await hash_password_async(payload.password)
-    user = User(username=username, password_hash=password_hash)
-    session.add(user)
-    await session.flush()
-    project = Project(owner_id=user.id, name="我的画布")
-    session.add(project)
-    await session.flush()
-    starter_doc = {
-        "schema_version": 1,
-        "items": [
-            {
-                "id": "starter-welcome-note",
-                "type": "note",
-                "x": -180,
-                "y": -90,
-                "width": 360,
-                "height": 180,
-                "title": "FLOWCANVAS · 创意起点",
-                "content": (
-                    "• 快捷键：V 选择/框选 · H/Space 抓手平移 · T 文字 · B 画笔 · Del 删除\n"
-                    "• 右上或首页进入「设置」配置你自己的 LLM 与生图 API Key 即可开箱创作\n"
-                    "• 点击画布上传图片并点选引用，下方「直接生图」或切换 AI Agent 协同创作"
-                ),
-                "visible": True,
-            }
-        ],
-    }
-    session.add(
-        Canvas(
-            project_id=project.id,
-            name="我的第一个灵感画布",
-            document=starter_doc,
-            viewport={"x": 0, "y": 0, "scale": 1},
-            schema_version=1,
-            revision=0,
-        )
+    user = User(
+        username=username,
+        email=email,
+        email_verified=True,
+        password_hash=password_hash,
     )
-    token = new_session_token()
-    session.add(
-        UserSession(
-            user_id=user.id,
-            token_hash=token_digest(token),
-            expires_at=datetime.now(UTC) + timedelta(days=request.app.state.settings.session_days),
+    try:
+        session.add(user)
+        await session.flush()
+        project = Project(owner_id=user.id, name="我的画布")
+        session.add(project)
+        await session.flush()
+        starter_doc = {
+            "schema_version": 1,
+            "items": [
+                {
+                    "id": "starter-welcome-note",
+                    "type": "note",
+                    "x": -180,
+                    "y": -90,
+                    "width": 360,
+                    "height": 180,
+                    "title": "FLOWCANVAS · 创意起点",
+                    "content": (
+                        "• 快捷键：V 选择/框选 · H/Space 抓手平移 · T 文字 · B 画笔 · Del 删除\n"
+                        "• 右上或首页进入「设置」配置你自己的 LLM 与生图 API Key 即可开箱创作\n"
+                        "• 点击画布上传图片并点选引用，下方「直接生图」或切换 AI Agent 协同创作"
+                    ),
+                    "visible": True,
+                }
+            ],
+        }
+        session.add(
+            Canvas(
+                project_id=project.id,
+                name="我的第一个灵感画布",
+                document=starter_doc,
+                viewport={"x": 0, "y": 0, "scale": 1},
+                schema_version=1,
+                revision=0,
+            )
         )
-    )
-    await _audit_event(session, user.id, "auth.register", "user", str(user.id))
-    await session.commit()
+        token = new_session_token()
+        session.add(
+            UserSession(
+                user_id=user.id,
+                token_hash=token_digest(token),
+                expires_at=datetime.now(UTC)
+                + timedelta(days=request.app.state.settings.session_days),
+            )
+        )
+        await _audit_event(session, user.id, "auth.register", "user", str(user.id))
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "用户名或邮箱已被使用") from error
     _cookie(response, token, request.app.state.settings)
     return _user_out(user)
 
@@ -364,17 +561,23 @@ async def login(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> UserOut:
+    identifier = payload.resolved_identifier.lower()
     await enforce_rate_limit(
         request.app.state.redis,
         "auth_login",
-        f"{_client_ip(request)}:{payload.username.lower()[:64]}",
+        f"{_client_ip(request)}:{identifier[:64]}",
         limit=request.app.state.settings.auth_rate_limit_per_minute,
     )
     user = await session.scalar(
-        select(User).where(func.lower(User.username) == payload.username.lower())
+        select(User).where(
+            or_(
+                func.lower(User.username) == identifier,
+                (func.lower(User.email) == identifier) & User.email_verified.is_(True),
+            )
+        )
     )
     if user is None or not await verify_password_async(payload.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名、邮箱或密码错误")
     await _create_session(session, user, request.app.state.settings, response)
     return _user_out(user)
 
@@ -444,6 +647,91 @@ async def change_password(
     return response
 
 
+@router.post("/auth/password/reset", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_password(
+    payload: PasswordResetRequest,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    email = payload.email.lower()
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_password_reset",
+        f"{_client_ip(request)}:{email[:64]}",
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
+    await _verify_and_consume_email_code(
+        session,
+        email=email,
+        purpose="reset_password",
+        code=payload.verification_code,
+        settings=request.app.state.settings,
+    )
+    user = await session.scalar(
+        select(User).where(func.lower(User.email) == email, User.email_verified.is_(True))
+    )
+    if user is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "该邮箱尚未绑定可用账户")
+    user.password_hash = await hash_password_async(payload.new_password)
+    await session.execute(delete(UserSession).where(UserSession.user_id == user.id))
+    await _audit_event(session, user.id, "auth.password_reset", "user", str(user.id))
+    await session.commit()
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=request.app.state.settings.cookie_secure,
+        samesite="lax",
+    )
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
+
+
+@router.post("/auth/email/bind", response_model=UserOut)
+async def bind_email(
+    payload: BindEmailRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> UserOut:
+    await enforce_rate_limit(
+        request.app.state.redis,
+        "auth_email_bind",
+        str(user.id),
+        limit=request.app.state.settings.auth_rate_limit_per_minute,
+    )
+    email = payload.email.lower()
+    existing = await session.scalar(
+        select(User.id).where(func.lower(User.email) == email, User.id != user.id)
+    )
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已被其他账户绑定")
+    await _verify_and_consume_email_code(
+        session,
+        email=email,
+        purpose="bind_email",
+        code=payload.verification_code,
+        settings=request.app.state.settings,
+    )
+    user.email = email
+    user.email_verified = True
+    await _audit_event(
+        session,
+        user.id,
+        "auth.email_bound",
+        "user",
+        str(user.id),
+        details={"domain": email.partition("@")[2]},
+    )
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已被其他账户绑定") from error
+    return _user_out(user)
+
+
 @router.delete("/auth/account", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(
     payload: LoginRequest,
@@ -458,7 +746,11 @@ async def delete_account(
         str(user.id),
         limit=request.app.state.settings.auth_rate_limit_per_minute,
     )
-    if payload.username.lower() != user.username.lower() or not await verify_password_async(
+    confirm_ident = payload.resolved_identifier.lower()
+    matches_identity = confirm_ident == user.username.lower() or (
+        bool(user.email) and bool(user.email_verified) and confirm_ident == user.email.lower()
+    )
+    if not matches_identity or not await verify_password_async(
         payload.password, user.password_hash
     ):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "账户确认信息不正确")

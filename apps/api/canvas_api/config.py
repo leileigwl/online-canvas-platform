@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     s3_access_key: str | None = None
     s3_secret_key: str | None = None
 
+    smtp_enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = Field(default=465, ge=1, le=65535)
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "FlowCanvas"
+    smtp_use_ssl: bool = True
+    email_code_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    email_code_cooldown_seconds: int = Field(default=60, ge=10, le=600)
+    email_code_max_attempts: int = Field(default=5, ge=1, le=20)
+
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
         if self.app_env == "production":
@@ -44,6 +56,10 @@ class Settings(BaseSettings):
                 )
             if not self.cookie_secure:
                 raise ValueError("COOKIE_SECURE must be enabled in production")
+            if self.smtp_enabled and not all((self.smtp_host, self.smtp_user, self.smtp_password)):
+                raise ValueError(
+                    "SMTP_HOST, SMTP_USER and SMTP_PASSWORD are required when SMTP_ENABLED=true"
+                )
         if self.asset_storage == "s3" and not all(
             (self.s3_endpoint_url, self.s3_access_key, self.s3_secret_key)
         ):

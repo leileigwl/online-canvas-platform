@@ -45,7 +45,24 @@ class User(UUIDModel):
     __tablename__ = "users"
 
     username: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(
+        String(255), unique=True, index=True, nullable=True, default=None
+    )
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(256))
+
+
+class EmailVerificationCode(UUIDModel):
+    __tablename__ = "email_verification_codes"
+
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    purpose: Mapped[str] = mapped_column(String(32), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
 
 
 class UserSession(UUIDModel):

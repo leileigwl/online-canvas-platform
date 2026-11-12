@@ -11,9 +11,49 @@ class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+_EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+    r"@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+)
+_CODE_RE = re.compile(r"^\d{6}$")
+EmailCodePurpose = Literal["register", "reset_password", "bind_email"]
+
+
+def _normalize_email(value: str) -> str:
+    if any(ch in value for ch in ("\r", "\n", "\x00")):
+        raise ValueError("邮箱格式无效")
+    cleaned = value.strip().lower()
+    if not cleaned or len(cleaned) > 255 or not _EMAIL_RE.fullmatch(cleaned):
+        raise ValueError("请输入有效的邮箱地址")
+    local_part, _, domain_part = cleaned.partition("@")
+    if len(local_part) > 64 or len(domain_part) > 253:
+        raise ValueError("请输入有效的邮箱地址")
+    return cleaned
+
+
+def _normalize_code(value: str) -> str:
+    cleaned = value.strip()
+    if not _CODE_RE.fullmatch(cleaned):
+        raise ValueError("验证码须为 6 位数字")
+    return cleaned
+
+
+class EmailCodeRequest(APIModel):
+    email: str = Field(min_length=1, max_length=255)
+    purpose: EmailCodePurpose
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+
 class UserCreate(APIModel):
     username: str = Field(min_length=3, max_length=24)
+    email: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=8, max_length=128)
+    verification_code: str = Field(min_length=1, max_length=16)
 
     @field_validator("username")
     @classmethod
@@ -23,10 +63,38 @@ class UserCreate(APIModel):
             raise ValueError("用户名须为 3–24 个字母、数字或下划线")
         return value
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+    @field_validator("verification_code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        return _normalize_code(value)
+
 
 class LoginRequest(APIModel):
-    username: str = Field(min_length=1, max_length=128)
+    identifier: str | None = Field(default=None, min_length=1, max_length=255)
+    username: str | None = Field(default=None, min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def normalize_identifier(self) -> LoginRequest:
+        ident = self.identifier.strip() if self.identifier is not None else None
+        uname = self.username.strip() if self.username is not None else None
+        if ident and uname and ident != uname:
+            raise ValueError("登录账号参数冲突")
+        resolved = ident or uname or ""
+        if not resolved or any(ch in resolved for ch in ("\r", "\n", "\x00")):
+            raise ValueError("请输入用户名或邮箱")
+        self.identifier = resolved
+        self.username = resolved
+        return self
+
+    @property
+    def resolved_identifier(self) -> str:
+        return self.identifier or self.username or ""
 
 
 class PasswordChange(APIModel):
@@ -34,9 +102,42 @@ class PasswordChange(APIModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class PasswordResetRequest(APIModel):
+    email: str = Field(min_length=1, max_length=255)
+    verification_code: str = Field(min_length=1, max_length=16)
+    new_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+    @field_validator("verification_code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        return _normalize_code(value)
+
+
+class BindEmailRequest(APIModel):
+    email: str = Field(min_length=1, max_length=255)
+    verification_code: str = Field(min_length=1, max_length=16)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+    @field_validator("verification_code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        return _normalize_code(value)
+
+
 class UserOut(APIModel):
     id: uuid.UUID
     username: str
+    email: str | None = None
+    email_verified: bool = False
 
 
 class ProjectCreate(APIModel):

@@ -11,6 +11,7 @@ import asyncio
 import base64
 import io
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -30,11 +31,18 @@ app = FastAPI(title="FlowCanvas Local Mflux Bridge", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+_SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
 
 
 class ImageGenRequest(BaseModel):
@@ -193,7 +201,8 @@ async def generate_images(req: ImageGenRequest) -> dict:
     w, h = _clamp_dimensions(w, h, max_bound=768)
 
     steps = max(1, min(12, req.steps or 4))
-    model_name = req.model or DEFAULT_MODEL
+    raw_model = (req.model or DEFAULT_MODEL).strip()
+    model_name = raw_model if _SAFE_MODEL_RE.match(raw_model) else DEFAULT_MODEL
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_png = os.path.join(tmp_dir, "mflux_output.png")

@@ -2589,6 +2589,13 @@ async def reset_session_memory(
     agent_session.estimated_tokens = 0
     agent_session.rejected_feedback = []
     agent_session.pinned_user_values = []
+    await _audit_event(
+        session,
+        user.id,
+        "agent_session.memory.reset",
+        "agent_session",
+        str(agent_session.id),
+    )
     await session.commit()
     await session.refresh(agent_session)
     cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
@@ -2609,6 +2616,13 @@ async def delete_agent_session(
     )
     if agent_session is None:
         raise not_found()
+    await _audit_event(
+        session,
+        user.id,
+        "agent_session.delete",
+        "agent_session",
+        str(agent_session.id),
+    )
     await session.delete(agent_session)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

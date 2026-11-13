@@ -9,7 +9,12 @@ from datetime import UTC, datetime, timedelta
 from arq import cron
 from arq.connections import RedisSettings
 from arq.constants import default_queue_name, in_progress_key_prefix
-from canvas_api.agent_guardrails import estimate_tokens_cjk, redact_secrets
+from canvas_api.agent_guardrails import (
+    detect_prompt_injection,
+    estimate_tokens_cjk,
+    redact_secrets,
+    wrap_untrusted_text,
+)
 from canvas_api.config import Settings, get_settings
 from canvas_api.database import create_database
 from canvas_api.image_assets import persist_generated_images, resolve_user_image_provider
@@ -1080,7 +1085,10 @@ def _canvas_summary(items: list[dict]) -> list[dict]:
             for key in ("id", "type", "title", "x", "y", "width", "height", "color")
         }
         if item.get("content"):
-            row["content"] = str(item["content"])[:600]
+            raw_content = str(item["content"])[:600]
+            if detect_prompt_injection(raw_content):
+                raw_content = wrap_untrusted_text("canvas_item", raw_content)
+            row["content"] = raw_content
         summary.append(row)
     return summary
 

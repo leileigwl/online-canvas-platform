@@ -90,7 +90,7 @@
 flowchart LR
   User["瀏覽器 (React 19 + Konva)"] -->|HTTP / SSE| Web["Caddy 2 反向代理 (:8080)"]
   Web -->|靜態資源| Dist["Vite 建置產物"]
-  Web -->|/api/*| API["FastAPI 後端 (:8000)"]
+  Web -->|"/api"| API["FastAPI 後端 (:8000)"]
 
   API -->|非同步 SQLAlchemy| PG[("PostgreSQL 18")]
   API -->|限流 / 佇列| Redis[("Redis 7")]

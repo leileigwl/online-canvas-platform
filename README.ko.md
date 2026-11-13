@@ -67,7 +67,7 @@
 flowchart LR
   User["브라우저 (React 19 + Konva)"] -->|HTTP / SSE| Web["Caddy 2 리버스 프록시 (:8080)"]
   Web -->|정적 SPA| Dist["Vite 빌드 번들"]
-  Web -->|/api/*| API["FastAPI 백엔드 (:8000)"]
+  Web -->|"/api"| API["FastAPI 백엔드 (:8000)"]
 
   API -->|비동기 SQLAlchemy| PG[("PostgreSQL 18")]
   API -->|레이트 리밋 / 큐| Redis[("Redis 7")]

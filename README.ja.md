@@ -76,7 +76,7 @@
 flowchart LR
   User["ブラウザ (React 19 + Konva)"] -->|HTTP / SSE| Web["Caddy 2 リバースプロキシ (:8080)"]
   Web -->|静的SPA| Dist["Vite ビルド成果物"]
-  Web -->|/api/*| API["FastAPI バックエンド (:8000)"]
+  Web -->|"/api"| API["FastAPI バックエンド (:8000)"]
 
   API -->|非同期 SQLAlchemy| PG[("PostgreSQL 18")]
   API -->|レート制限 / キュー| Redis[("Redis 7")]

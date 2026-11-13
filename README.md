@@ -99,7 +99,7 @@ Most AI image tools lock creators into a linear chat feed, while traditional whi
 flowchart LR
   User["Browser (React 19 + Konva)"] -->|HTTP / SSE| Web["Caddy 2 Reverse Proxy (:8080)"]
   Web -->|Static SPA| Dist["Vite Production Bundle"]
-  Web -->|/api/*| API["FastAPI Backend (:8000)"]
+  Web -->|"/api"| API["FastAPI Backend (:8000)"]
 
   API -->|Async SQLAlchemy| PG[("PostgreSQL 18")]
   API -->|Rate Limit / PubSub| Redis[("Redis 7")]

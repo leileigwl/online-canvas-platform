@@ -67,7 +67,7 @@ La mayoría de las herramientas de imagen con IA encierran al creador en un chat
 flowchart LR
   User["Navegador (React 19 + Konva)"] -->|HTTP / SSE| Web["Proxy Inverso Caddy 2 (:8080)"]
   Web -->|SPA Estática| Dist["Bundle Vite"]
-  Web -->|/api/*| API["Backend FastAPI (:8000)"]
+  Web -->|"/api"| API["Backend FastAPI (:8000)"]
 
   API -->|SQLAlchemy Asíncrono| PG[("PostgreSQL 18")]
   API -->|Límites / Colas| Redis[("Redis 7")]

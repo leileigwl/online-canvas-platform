@@ -329,7 +329,9 @@ class ImageModelConfigOut(APIModel):
 
 class ImageGenerationOptions(APIModel):
     model: str = Field(default="auto", min_length=1, max_length=160)
-    quality: Literal["auto", "low", "medium", "high", "very_high", "maximum"] = "auto"
+    quality: Literal["auto", "low", "medium", "high", "very_high", "maximum", "standard", "hd"] = (
+        "auto"
+    )
     width: int = Field(default=1024, ge=64, le=4096)
     height: int = Field(default=1024, ge=64, le=4096)
     align_to_16: bool = True
@@ -367,6 +369,7 @@ def _unique_reference_assets(value: list[uuid.UUID]) -> list[uuid.UUID]:
 
 class HarnessRunOptions(APIModel):
     use_mock_image: bool = False
+    image_engine: Literal["local-mflux", "cloud-api", "mock"] = "local-mflux"
     llm_mode: Literal["real", "scripted"] = "real"
     loop_mode: Literal["autonomous", "pipeline"] = "autonomous"
     lab_scenario: Literal["normal", "collision_repair", "memory_compaction"] = "normal"

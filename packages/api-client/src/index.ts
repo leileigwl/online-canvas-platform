@@ -1,6 +1,11 @@
-import type { CanvasDocument, CanvasSnapshot, CanvasViewport } from "@canvas/canvas-core";
+import type {
+  CanvasDocument,
+  CanvasItem,
+  CanvasSnapshot,
+  CanvasViewport,
+} from "@canvas/canvas-core";
 
-export type { CanvasDocument, CanvasSnapshot, CanvasViewport };
+export type { CanvasDocument, CanvasItem, CanvasSnapshot, CanvasViewport };
 
 export type User = {
   id: string;
@@ -111,6 +116,7 @@ export type AgentProposalOperation = {
 
 export type HarnessRunOptions = {
   use_mock_image?: boolean;
+  image_engine?: "local-mflux" | "cloud-api" | "mock";
   llm_mode?: "real" | "scripted";
   loop_mode?: "autonomous" | "pipeline";
   lab_scenario?: "normal" | "collision_repair" | "memory_compaction";

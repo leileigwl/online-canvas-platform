@@ -1116,12 +1116,20 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             )
         )
         use_mock_image = bool(harness_options.get("use_mock_image", False))
+        image_engine = str(
+            harness_options.get("image_engine")
+            or ("mock" if use_mock_image else "local-mflux")
+        )
+        if image_engine == "mock":
+            use_mock_image = True
+        elif image_engine == "local-mflux":
+            use_mock_image = False
         lab_scenario = str(harness_options.get("lab_scenario") or "normal")
         force_compact = bool(harness_options.get("force_compact", False))
         max_repair_rounds = max(0, min(3, int(harness_options.get("max_repair_rounds", 2))))
         max_loop_steps = max(2, min(16, int(harness_options.get("max_loop_steps", 10))))
         compaction_threshold_pct = max(
-            5, min(90, int(harness_options.get("compaction_threshold_pct", 65)))
+            5, min(95, int(harness_options.get("compaction_threshold_pct", 85)))
         )
         completion_tokens_per_call = run.completion_tokens_per_call
         model_config = await session.scalar(
@@ -1351,7 +1359,15 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 img_provider = MockImageProvider(latency_ms=80)
             else:
                 img_provider = await resolve_user_image_provider(
-                    session, owner_id, settings, fallback=fallback_img_provider
+                    session,
+                    owner_id,
+                    settings,
+                    fallback=fallback_img_provider,
+                    requested_model=(
+                        "RunPod/FLUX.2-klein-4B-mflux-4bit"
+                        if image_engine == "local-mflux"
+                        else None
+                    ),
                 )
             ref_images: list[ReferenceImage] = []
             if ordered_asset_ids:

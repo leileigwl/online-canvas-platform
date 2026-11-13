@@ -54,6 +54,11 @@ def _is_public_global_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
     return True
 
 
+def _is_local_dev_host(hostname: str) -> bool:
+    clean = hostname.strip("[]").rstrip(".").lower()
+    return clean == "host.docker.internal" or clean.endswith(".docker.internal")
+
+
 def _resolve_public_ip(hostname: str, port: int) -> str:
     clean_host = hostname.strip("[]").rstrip(".").lower()
     if clean_host == "localhost" or clean_host.endswith((".local", ".localhost")):
@@ -75,14 +80,14 @@ def _resolve_public_ip(hostname: str, port: int) -> str:
 
 def validate_public_https_url(value: str) -> str:
     parsed = urlsplit(value)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.fragment
-    ):
-        raise ValueError("模型服务地址必须是有效的 HTTPS URL")
+    if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise ValueError("模型服务地址格式无效")
+    if _is_local_dev_host(parsed.hostname):
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("本地模型服务地址必须是 http 或 https")
+        return value.rstrip("/")
+    if parsed.scheme != "https":
+        raise ValueError("公网模型服务地址必须是有效的 HTTPS URL")
     _resolve_public_ip(parsed.hostname, parsed.port or 443)
     return value.rstrip("/")
 
@@ -98,6 +103,14 @@ class _PublicOnlyNetworkBackend(httpcore.AnyIOBackend):
         local_address: str | None = None,
         socket_options: object | None = None,
     ) -> httpcore.AsyncNetworkStream:
+        if _is_local_dev_host(host):
+            return await super().connect_tcp(
+                host,
+                port,
+                timeout=timeout,
+                local_address=local_address,
+                socket_options=socket_options,
+            )
         try:
             pinned_ip = await asyncio.to_thread(_resolve_public_ip, host, port)
         except ValueError as error:

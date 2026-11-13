@@ -4,6 +4,8 @@ import {
   subscribeRunEvents,
   type AgentRun,
   type AgentSession,
+  type Asset,
+  type CanvasItem,
   type CanvasSnapshot,
   type HarnessInspectResult,
   type HarnessRunOptions,
@@ -170,7 +172,15 @@ export function AgentLabPage() {
 
   const [goal, setGoal] = useState("");
   const [llmMode, setLlmMode] = useState<"scripted" | "real">("real");
-  const [useMockImage, setUseMockImage] = useState(true);
+  const [imageEngine, setImageEngine] = useState<"local-mflux" | "cloud-api" | "mock">("local-mflux");
+  const [showFluxPlayground, setShowFluxPlayground] = useState(false);
+  const [fluxPrompt, setFluxPrompt] = useState(
+    "a cute cat sitting on a windowsill, soft natural lighting, high detail",
+  );
+  const [fluxAspect, setFluxAspect] = useState<"16:9" | "1:1" | "4:3" | "9:16">("16:9");
+  const [fluxSteps, setFluxSteps] = useState(4);
+  const [fluxRendering, setFluxRendering] = useState(false);
+  const [fluxResult, setFluxResult] = useState<Asset | null>(null);
   const [labScenario, setLabScenario] = useState<
     "normal" | "collision_repair" | "memory_compaction"
   >("normal");
@@ -335,7 +345,8 @@ export function AgentLabPage() {
       const harness_options: HarnessRunOptions = {
         llm_mode: llmMode,
         loop_mode: "autonomous",
-        use_mock_image: useMockImage,
+        use_mock_image: imageEngine === "mock",
+        image_engine: imageEngine,
         lab_scenario: scenarioToUse,
         force_compact: forceCompact,
         max_repair_rounds: 2,
@@ -419,6 +430,102 @@ export function AgentLabPage() {
       kind: "info",
       text: "已彻底重置当前 Agent 的云端记忆摘要与避坑记录。",
     });
+  };
+
+  const handleGenerateFlux = async () => {
+    if (!fluxPrompt.trim() || fluxRendering) return;
+    setFluxRendering(true);
+    setStatusMsg(null);
+    try {
+      let w = 1024;
+      let h = 1024;
+      if (fluxAspect === "16:9") {
+        w = 1024;
+        h = 576;
+      } else if (fluxAspect === "4:3") {
+        w = 1024;
+        h = 768;
+      } else if (fluxAspect === "9:16") {
+        w = 576;
+        h = 1024;
+      }
+
+      const res = await api.generateImage({
+        prompt: fluxPrompt.trim(),
+        model: "RunPod/FLUX.2-klein-4B-mflux-4bit",
+        reference_asset_ids: [],
+        quality: "auto",
+        width: w,
+        height: h,
+        align_to_16: true,
+        resolution: "auto",
+        aspect_ratio: fluxAspect,
+        transparent: false,
+        count: 1,
+      });
+      if (res.images && res.images.length > 0) {
+        setFluxResult(res.images[0]);
+        setStatusMsg({ kind: "info", text: "Flux 2 Klein 本地生图成功！已持久化至云端 MinIO。" });
+      }
+    } catch (err) {
+      setStatusMsg({
+        kind: "error",
+        text: err instanceof ApiError ? err.message : "生图失败，请检查本地 mflux 服务",
+      });
+    } finally {
+      setFluxRendering(false);
+    }
+  };
+
+  const handlePushFluxToCanvas = async () => {
+    if (!fluxResult || !snapshot || !selectedCanvasId) return;
+    try {
+      const curDoc = snapshot.document || { schema_version: 1, items: [] };
+      const curItems = Array.isArray(curDoc.items) ? curDoc.items : [];
+      let maxX = -120;
+      let suggestedY = -120;
+      for (const it of curItems) {
+        if (typeof it.x === "number" && typeof it.width === "number") {
+          maxX = Math.max(maxX, it.x + it.width);
+        }
+      }
+      const rightClearX = maxX > -120 ? Math.round(maxX + 48) : -120;
+
+      const newItem: CanvasItem = {
+        id: `flux-${Date.now()}`,
+        type: "image",
+        asset_id: fluxResult.id,
+        src: `/api/assets/${fluxResult.id}/content`,
+        x: rightClearX,
+        y: suggestedY,
+        width: fluxAspect === "16:9" ? 512 : 384,
+        height: fluxAspect === "16:9" ? 288 : 384,
+        title: fluxResult.name || "Flux 2 生成图",
+      };
+
+      const newDoc = {
+        ...curDoc,
+        items: [...curItems, newItem],
+      };
+
+      const saved = await api.saveCanvas(
+        selectedCanvasId,
+        snapshot.revision,
+        newDoc,
+        snapshot.viewport,
+      );
+      setSnapshot(saved);
+      setStatusMsg({
+        kind: "info",
+        text: `已将 Flux 生成图推入画布右侧 (x=${newItem.x}, y=${newItem.y})！`,
+      });
+      await refreshSessionView(selectedCanvasId, activeSessionId, compactionThresholdPct);
+    } catch (err) {
+      setStatusMsg({
+        kind: "error",
+        text: err instanceof ApiError ? err.message : "推入画布失败",
+      });
+    }
   };
 
   const handleApplyProposal = async (runToApply: AgentRun) => {
@@ -1105,14 +1212,29 @@ export function AgentLabPage() {
                       <option value={5}>压缩线 5%（短窗压测专用）</option>
                     </select>
 
-                    <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <input
-                        type="checkbox"
-                        checked={useMockImage}
-                        onChange={(e) => setUseMockImage(e.target.checked)}
-                      />
-                      Mock 生图
-                    </label>
+                    <select
+                      style={{ ...controlStyle, height: 28, fontSize: 11.5 }}
+                      value={imageEngine}
+                      onChange={(e) => {
+                        const val = e.target.value as "local-mflux" | "cloud-api" | "mock";
+                        setImageEngine(val);
+                      }}
+                      title="生图引擎选择"
+                    >
+                      <option value="local-mflux">本地 Flux (mflux-4b ⚡)</option>
+                      <option value="cloud-api">云端 API 生图</option>
+                      <option value="mock">Mock 极速生图</option>
+                    </select>
+
+                    <button
+                      type="button"
+                      className="chip-btn"
+                      style={{ background: "#7c3aed", color: "#fff", border: "none", fontWeight: 600 }}
+                      onClick={() => setShowFluxPlayground(true)}
+                      title="打开 Flux 2 Klein 本地生图实验室"
+                    >
+                      🎨 Flux 生图实验室
+                    </button>
 
                     <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
                       <input
@@ -1129,7 +1251,7 @@ export function AgentLabPage() {
                       disabled={busy}
                       onClick={() => {
                         setLabScenario("memory_compaction");
-                        setCompactionThresholdPct(5);
+                        setCompactionThresholdPct(85);
                         setLlmMode("scripted");
                         void handleSendMessage(
                           "测试多步循环上下文超阈值后自动压缩记忆，并保留云端摘要",
@@ -1137,7 +1259,7 @@ export function AgentLabPage() {
                         );
                       }}
                     >
-                      ⚡ 一键测试满窗自动压缩
+                      ⚡ 压测 85% 压缩线
                     </button>
 
                     <button
@@ -1499,6 +1621,308 @@ export function AgentLabPage() {
           </>
         )}
       </main>
+
+      {showFluxPlayground && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.45)",
+            backdropFilter: "blur(4px)",
+            zIndex: 9999,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowFluxPlayground(false);
+          }}
+        >
+          <div
+            style={{
+              background: "#fff",
+              borderRadius: 16,
+              boxShadow: "0 20px 40px rgba(0,0,0,0.2)",
+              width: "100%",
+              maxWidth: 720,
+              maxHeight: "90vh",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "16px 20px",
+                borderBottom: "1px solid var(--border-color)",
+                background: "#fafaf9",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 20 }}>🎨</span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+                    Flux 2 Klein (4-bit) 本地生图实验室
+                  </h3>
+                  <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                    基于 Apple Silicon MLX GPU · 本地桥接: http://127.0.0.1:8002/v1
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="fc-btn fc-btn-ghost fc-btn-sm"
+                style={{ fontSize: 16, cursor: "pointer" }}
+                onClick={() => setShowFluxPlayground(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div
+              style={{
+                padding: 20,
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: 16,
+              }}
+            >
+              <div>
+                <label
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    display: "block",
+                    marginBottom: 6,
+                  }}
+                >
+                  快速填入预设需求场景：
+                </label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {[
+                    {
+                      label: "🐱 窗台小猫 (16:9)",
+                      prompt:
+                        "a cute cat sitting on a windowsill, soft natural lighting, high detail",
+                      aspect: "16:9",
+                    },
+                    {
+                      label: "🐕 3只不同品种狗狗 (16:9)",
+                      prompt:
+                        "three different cute dogs, golden retriever, corgi and siberian husky, studio lighting",
+                      aspect: "16:9",
+                    },
+                    {
+                      label: "🎨 极简暖象牙主图 (16:9)",
+                      prompt:
+                        "warm ivory minimalist editorial background visual, elegant aesthetics, 16:9 aspect ratio",
+                      aspect: "16:9",
+                    },
+                    {
+                      label: "🏥 医疗对比图像 (4:3)",
+                      prompt:
+                        "high contrast cold gray minimalist abstract concept visual, professional clarity",
+                      aspect: "4:3",
+                    },
+                  ].map((p, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      className="chip-btn"
+                      style={{ fontSize: 11.5 }}
+                      onClick={() => {
+                        setFluxPrompt(p.prompt);
+                        setFluxAspect(p.aspect as "16:9" | "1:1" | "4:3" | "9:16");
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    display: "block",
+                    marginBottom: 6,
+                  }}
+                >
+                  提示词 (Prompt):
+                </label>
+                <textarea
+                  rows={3}
+                  value={fluxPrompt}
+                  onChange={(e) => setFluxPrompt(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: 10,
+                    borderRadius: 8,
+                    border: "1px solid var(--border-color)",
+                    fontSize: 13,
+                    boxSizing: "border-box",
+                  }}
+                  placeholder="输入画面描述..."
+                />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <div>
+                  <label
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      display: "block",
+                      marginBottom: 6,
+                    }}
+                  >
+                    画幅比例 (Aspect Ratio):
+                  </label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {(["16:9", "1:1", "4:3", "9:16"] as const).map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        className="fc-btn fc-btn-sm"
+                        style={{
+                          flex: 1,
+                          background: fluxAspect === r ? "#7c3aed" : "var(--bg-card)",
+                          color: fluxAspect === r ? "#fff" : "inherit",
+                          border: "1px solid var(--border-color)",
+                        }}
+                        onClick={() => setFluxAspect(r)}
+                      >
+                        {r}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      display: "block",
+                      marginBottom: 6,
+                    }}
+                  >
+                    渲染步数 (Steps: {fluxSteps} 步 - 4步极速推理):
+                  </label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={12}
+                    value={fluxSteps}
+                    onChange={(e) => setFluxSteps(Number(e.target.value))}
+                    style={{ width: "100%", accentColor: "#7c3aed" }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                <button
+                  type="button"
+                  className="fc-btn fc-btn-primary"
+                  style={{ background: "#7c3aed", borderColor: "#7c3aed" }}
+                  disabled={fluxRendering || !fluxPrompt.trim()}
+                  onClick={() => void handleGenerateFlux()}
+                >
+                  {fluxRendering
+                    ? "⚡ 正在调用 Apple Silicon MLX 渲染..."
+                    : "🚀 开始本地渲染 (RunPod/FLUX.2-klein-4B)"}
+                </button>
+              </div>
+
+              {fluxResult && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: 14,
+                    borderRadius: 12,
+                    background: "#fafaf9",
+                    border: "1px solid var(--border-color)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 12,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "#166534" }}>
+                      ✓ 渲染成功 · MinIO 资产持久化就绪
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      ID: {fluxResult.id.slice(0, 8)}... | {fluxResult.width}×
+                      {fluxResult.height} ({fluxAspect})
+                    </span>
+                  </div>
+
+                  <div
+                    style={{
+                      width: "100%",
+                      maxHeight: 320,
+                      borderRadius: 8,
+                      overflow: "hidden",
+                      background: "#000",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <img
+                      src={`/api/assets/${fluxResult.id}/content`}
+                      alt="Flux 2 Preview"
+                      style={{
+                        maxWidth: "100%",
+                        maxHeight: 320,
+                        objectFit: "contain",
+                      }}
+                    />
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      引擎: Apple Silicon MLX (mflux-4bit) · 存储: S3/MinIO
+                    </span>
+                    <button
+                      type="button"
+                      className="fc-btn fc-btn-sm"
+                      style={{
+                        background: "#10b981",
+                        color: "#fff",
+                        border: "none",
+                        fontWeight: 600,
+                      }}
+                      onClick={() => void handlePushFluxToCanvas()}
+                    >
+                      📥 一键推入画布 (无重叠落盘)
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -337,3 +337,119 @@ async def test_tiered_context_pinned_values_and_scratchpad_pruning(tmp_path: Pat
                 assert any("16:9" in str(p) for p in sess_row.pinned_user_values)
                 assert any("专员情报" in str(p) for p in sess_row.pinned_user_values)
                 assert sess_row.compacted_summary != ""
+
+
+@pytest.mark.asyncio
+async def test_progressive_multi_run_85pct_compaction_and_mflux_engine(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="development",
+        app_secret_key="test-secret-key-at-least-thirty-two-chars",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'mflux_progressive.db'}",
+        queue_enabled=False,
+        auto_create_schema=True,
+        asset_storage="local",
+        asset_local_path=str(tmp_path / "assets"),
+        max_agent_model_calls_per_run=25,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with app.state.session_factory() as db:
+            user = User(username="flux_tester", password_hash=hash_password("pwd123"))
+            db.add(user)
+            await db.flush()
+            project = Project(owner_id=user.id, name="Flux Lab")
+            db.add(project)
+            await db.flush()
+            canvas = Canvas(
+                project_id=project.id,
+                name="Flux 2 渐进式压测画布",
+                document={"schema_version": 1, "items": []},
+                viewport={"x": 0, "y": 0, "scale": 1},
+                schema_version=1,
+                revision=0,
+            )
+            db.add(canvas)
+            await db.commit()
+            user_id = user.id
+            project_id = project.id
+            canvas_id = canvas.id
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.post(
+                "/api/auth/login",
+                json={"identifier": "flux_tester", "password": "pwd123"},
+            )
+            sessions_res = await client.get(f"/api/canvases/{canvas_id}/agent-sessions")
+            session_id = uuid.UUID(sessions_res.json()[0]["id"])
+
+            ctx = {
+                "settings": settings,
+                "session_factory": app.state.session_factory,
+                "object_storage": create_storage(settings),
+            }
+
+            goals = [
+                "一只可爱的小猫，卡通风格，明亮背景，保持 16:9 比例",
+                "生成暖象牙极简主图并配右侧便签，保持 16:9 比例",
+                "核磁共振专员要求：对比度增强，色调偏冷灰，比例保持 16:9",
+            ]
+
+            for i, g in enumerate(goals):
+                async with app.state.session_factory() as db:
+                    run_obj = AgentRun(
+                        owner_id=user_id,
+                        project_id=project_id,
+                        canvas_id=canvas_id,
+                        session_id=session_id,
+                        goal=g,
+                        reference_asset_ids=[],
+                        harness_options={
+                            "llm_mode": "scripted",
+                            "loop_mode": "autonomous",
+                            "image_engine": "local-mflux",
+                            "use_mock_image": True,
+                            "lab_scenario": "memory_compaction",
+                            "compaction_threshold_pct": 85,
+                            "force_compact": (i >= 1),
+                            "max_loop_steps": 10,
+                        },
+                        context_revision=0,
+                        model_call_budget=20,
+                        completion_tokens_per_call=2048,
+                        status=RunStatus.QUEUED,
+                    )
+                    db.add(run_obj)
+                    await db.flush()
+                    db.add(
+                        AgentTask(
+                            run_id=run_obj.id,
+                            role="Lead Agent",
+                            sequence=0,
+                            task_key="lead_agent",
+                            title=f"压测轮次 #{i+1}",
+                            depends_on=[],
+                            status=RunStatus.QUEUED,
+                        )
+                    )
+                    await db.commit()
+                    run_uuid = str(run_obj.id)
+
+                await execute_agent_run(ctx, run_uuid)
+
+            # Assert progressive retention of Layer 2 pinned user values
+            async with app.state.session_factory() as db:
+                sess_row = await db.get(AgentSession, session_id)
+                assert sess_row is not None
+                assert isinstance(sess_row.pinned_user_values, list)
+                # Verify that all 3 pinned user values exist without loss
+                assert any("16:9" in str(p) for p in sess_row.pinned_user_values)
+                assert any("暖象牙" in str(p) for p in sess_row.pinned_user_values)
+                assert any("专员情报" in str(p) for p in sess_row.pinned_user_values)
+                # Verify causal compaction summary
+                assert len(sess_row.compacted_summary) > 0
+                assert sess_row.compacted_run_count >= 1

@@ -160,4 +160,15 @@ async def resolve_user_image_provider(
             api_key=decrypt_secret(selected.encrypted_api_key, settings),
             default_model=selected.model_name,
         )
+
+    # Built-in zero-config Apple Silicon local flux engine fallback
+    clean_req = (requested_model or "").strip().lower()
+    if "flux" in clean_req or "mflux" in clean_req:
+        return ConfiguredImageProvider(
+            provider="openai-compatible",
+            base_url="http://host.docker.internal:8002/v1",
+            api_key="local-flux",
+            default_model=requested_model or "RunPod/FLUX.2-klein-4B-mflux-4bit",
+        )
+
     return fallback or UnconfiguredImageProvider()

@@ -351,7 +351,7 @@ class ConfiguredImageProvider:
     async def _dispatch(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
         safe_url = await asyncio.to_thread(validate_public_https_url, self.base_url)
         model = self.default_model if request.model in {"", "auto"} else request.model
-        async with build_safe_async_client(timeout=120) as client:
+        async with build_safe_async_client(timeout=240) as client:
             if self.provider == "google-gemini":
                 return await self._call_google_gemini(client, safe_url, model, request)
             if self.provider == "dashscope":

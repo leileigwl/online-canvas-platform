@@ -17,7 +17,7 @@ import time
 from typing import Literal
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
@@ -170,6 +170,17 @@ def list_models() -> dict:
     }
 
 
+def _clamp_dimensions(w: int, h: int, max_bound: int = 768) -> tuple[int, int]:
+    w = max(256, (w // 16) * 16)
+    h = max(256, (h // 16) * 16)
+    max_dim = max(w, h)
+    if max_dim > max_bound:
+        scale = max_bound / max_dim
+        w = max(256, (round(w * scale) // 16) * 16)
+        h = max(256, (round(h * scale) // 16) * 16)
+    return w, h
+
+
 @app.post("/v1/images/generations")
 async def generate_images(req: ImageGenRequest) -> dict:
     parts = req.size.lower().split("x")
@@ -178,9 +189,8 @@ async def generate_images(req: ImageGenRequest) -> dict:
     else:
         w, h = 1024, 1024
 
-    # Enforce safe 16-multiple bounds
-    w = max(256, min(2048, (w // 16) * 16))
-    h = max(256, min(2048, (h // 16) * 16))
+    # Enforce safe 16-multiple bounds and speed-optimized Apple Silicon limit (<=768 max bound)
+    w, h = _clamp_dimensions(w, h, max_bound=768)
 
     steps = max(1, min(12, req.steps or 4))
     model_name = req.model or DEFAULT_MODEL
@@ -214,22 +224,25 @@ async def generate_images(req: ImageGenRequest) -> dict:
             img_bytes = _generate_fallback_image(req.prompt, w, h, note)
         elif os.path.exists(MFLUX_BIN):
             try:
-                # Run CLI with a reasonable timeout
+                # Run CLI with a generous 240s timeout for Apple Silicon GPU
                 proc = await asyncio.to_thread(
                     subprocess.run,
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=90,
+                    timeout=240,
                 )
                 if proc.returncode == 0 and os.path.exists(out_png):
                     img_bytes = await asyncio.to_thread(_read_file_sync, out_png)
                 else:
                     err_msg = (proc.stderr or proc.stdout or "")[:300]
+                    print(f"[local_mflux_server ERROR] code={proc.returncode} err={err_msg}")
                     img_bytes = _generate_fallback_image(req.prompt, w, h, f"MLX 渲染就绪中 · {err_msg[:60]}")
             except subprocess.TimeoutExpired:
-                img_bytes = _generate_fallback_image(req.prompt, w, h, "MLX 渲染超时 (90s)，使用本地保真快照")
+                print(f"[local_mflux_server TIMEOUT] prompt={req.prompt[:60]} size={w}x{h}")
+                img_bytes = _generate_fallback_image(req.prompt, w, h, "MLX 渲染超时 (240s)，使用本地保真快照")
             except (subprocess.SubprocessError, OSError, ValueError) as ex:
+                print(f"[local_mflux_server EXCEPTION] {ex}")
                 img_bytes = _generate_fallback_image(req.prompt, w, h, f"本地渲染异常: {str(ex)[:60]}")
         else:
             img_bytes = _generate_fallback_image(req.prompt, w, h, "未检测到 mflux-generate-flux2 可执行文件")
@@ -248,6 +261,44 @@ async def generate_images(req: ImageGenRequest) -> dict:
             }
         ],
     }
+
+
+@app.post("/v1/images/edits")
+async def edit_images(request: Request) -> dict:
+    """OpenAI-compatible image edits endpoint matching generations route."""
+    content_type = request.headers.get("content-type", "")
+    prompt = "visual design concept"
+    model_name = DEFAULT_MODEL
+    size = "1024x1024"
+    steps = 4
+    seed = None
+
+    if "application/json" in content_type:
+        body = await request.json()
+        prompt = body.get("prompt") or prompt
+        model_name = body.get("model") or model_name
+        size = body.get("size") or size
+        steps = int(body.get("steps") or steps)
+        seed = body.get("seed")
+    else:
+        form = await request.form()
+        prompt = str(form.get("prompt") or prompt)
+        model_name = str(form.get("model") or model_name)
+        size = str(form.get("size") or size)
+        if form.get("steps"):
+            try:
+                steps = int(form.get("steps"))
+            except (ValueError, TypeError):
+                pass
+
+    req = ImageGenRequest(
+        prompt=prompt,
+        model=model_name,
+        size=size,
+        steps=steps,
+        seed=seed,
+    )
+    return await generate_images(req)
 
 
 def main():

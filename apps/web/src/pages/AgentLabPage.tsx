@@ -334,19 +334,26 @@ export function AgentLabPage() {
     [refreshSessionView],
   );
 
-  const handleSendMessage = async (overrideGoal?: string, overrideScenario?: typeof labScenario) => {
+  const handleSendMessage = async (
+    overrideGoal?: string,
+    overrideScenario?: typeof labScenario,
+    overrideLlmMode?: typeof llmMode,
+    overrideImageEngine?: typeof imageEngine,
+  ) => {
     const promptText = (overrideGoal ?? goal).trim();
     if (!selectedCanvasId || !activeSessionId || !promptText || busy) return;
     const scenarioToUse = overrideScenario ?? labScenario;
+    const llmModeToUse = overrideLlmMode ?? llmMode;
+    const imageEngineToUse = overrideImageEngine ?? imageEngine;
     setStatusMsg(null);
     setBusy(true);
     if (!overrideGoal) setGoal("");
     try {
       const harness_options: HarnessRunOptions = {
-        llm_mode: llmMode,
+        llm_mode: llmModeToUse,
         loop_mode: "autonomous",
-        use_mock_image: imageEngine === "mock",
-        image_engine: imageEngine,
+        use_mock_image: imageEngineToUse === "mock",
+        image_engine: imageEngineToUse,
         lab_scenario: scenarioToUse,
         force_compact: forceCompact,
         max_repair_rounds: 2,
@@ -437,17 +444,20 @@ export function AgentLabPage() {
     setFluxRendering(true);
     setStatusMsg(null);
     try {
-      let w = 1024;
-      let h = 1024;
+      let w = 768;
+      let h = 432;
       if (fluxAspect === "16:9") {
-        w = 1024;
-        h = 576;
+        w = 768;
+        h = 432;
+      } else if (fluxAspect === "1:1") {
+        w = 512;
+        h = 512;
       } else if (fluxAspect === "4:3") {
-        w = 1024;
-        h = 768;
+        w = 768;
+        h = 576;
       } else if (fluxAspect === "9:16") {
-        w = 576;
-        h = 1024;
+        w = 432;
+        h = 768;
       }
 
       const res = await api.generateImage({
@@ -1252,10 +1262,11 @@ export function AgentLabPage() {
                       onClick={() => {
                         setLabScenario("memory_compaction");
                         setCompactionThresholdPct(85);
-                        setLlmMode("scripted");
                         void handleSendMessage(
                           "测试多步循环上下文超阈值后自动压缩记忆，并保留云端摘要",
                           "memory_compaction",
+                          llmMode,
+                          imageEngine,
                         );
                       }}
                     >
@@ -1268,10 +1279,11 @@ export function AgentLabPage() {
                       disabled={busy}
                       onClick={() => {
                         setLabScenario("collision_repair");
-                        setLlmMode("scripted");
                         void handleSendMessage(
                           "生成暖象牙极简主图并配右侧便签（自动检测碰撞并自修复）",
                           "collision_repair",
+                          llmMode,
+                          imageEngine,
                         );
                       }}
                     >

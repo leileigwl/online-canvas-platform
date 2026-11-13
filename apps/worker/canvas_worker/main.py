@@ -25,6 +25,7 @@ from canvas_api.models import (
 )
 from canvas_api.providers.chat import OpenAICompatibleChatProvider, ProviderError
 from canvas_api.providers.images import (
+    ConfiguredImageProvider,
     ImageGenerationRequest,
     ImageProviderError,
     ImageProviderNotConfigured,
@@ -300,6 +301,12 @@ def _scripted_model_response(*, system: str, user: str, lab_scenario: str) -> di
                     "reason": "补充检查已有对象属性并触发多轮上下文累积观测",
                 }
             if step == 3:
+                pinned_vals = payload.get("pinned_user_values") or []
+                is_16_9 = "16:9" in goal or any("16:9" in str(p) for p in pinned_vals)
+                aspect = "16:9" if is_16_9 else "3:4"
+                img_w = 320 if is_16_9 else 240
+                img_h = 180 if is_16_9 else 320
+                note_x = round(base_x + img_w + 36, 1)
                 return {
                     "action": "design_canvas",
                     "summary": f"延续记忆生成并排布：{goal[:36]}",
@@ -311,9 +318,9 @@ def _scripted_model_response(*, system: str, user: str, lab_scenario: str) -> di
                                 **({"reference_object_ids": ref_ids} if ref_ids else {}),
                                 "x": base_x,
                                 "y": suggested_y,
-                                "width": 240,
-                                "height": 320,
-                                "aspect_ratio": "3:4",
+                                "width": img_w,
+                                "height": img_h,
+                                "aspect_ratio": aspect,
                             },
                         },
                         {
@@ -321,7 +328,7 @@ def _scripted_model_response(*, system: str, user: str, lab_scenario: str) -> di
                             "params": {
                                 "title": "延续设计说明",
                                 "content": f"响应需求：{goal[:80]}（已继承云端记忆并避开碰撞）",
-                                "x": round(base_x + 280, 1),
+                                "x": note_x,
                                 "y": suggested_y,
                                 "width": 220,
                                 "height": 140,
@@ -1358,11 +1365,21 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             if use_mock_image:
                 img_provider = MockImageProvider(latency_ms=80)
             else:
+                local_flux_fallback = (
+                    ConfiguredImageProvider(
+                        provider="openai-compatible",
+                        base_url="http://host.docker.internal:8002/v1",
+                        api_key="local-flux",
+                        default_model="RunPod/FLUX.2-klein-4B-mflux-4bit",
+                    )
+                    if image_engine == "local-mflux"
+                    else fallback_img_provider
+                )
                 img_provider = await resolve_user_image_provider(
                     session,
                     owner_id,
                     settings,
-                    fallback=fallback_img_provider,
+                    fallback=local_flux_fallback,
                     requested_model=(
                         "RunPod/FLUX.2-klein-4B-mflux-4bit"
                         if image_engine == "local-mflux"
@@ -1390,10 +1407,15 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                             content=await storage.get(asset.object_key),
                         )
                     )
+        chosen_model = (
+            "RunPod/FLUX.2-klein-4B-mflux-4bit"
+            if image_engine == "local-mflux"
+            else "auto"
+        )
         req = ImageGenerationRequest(
             user_id=owner_id,
             prompt=params["prompt"],
-            model="auto",
+            model=chosen_model,
             reference_asset_ids=tuple(ordered_asset_ids),
             quality="auto",
             width=1024,
@@ -1406,7 +1428,11 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             reference_images=tuple(ref_images),
             max_image_bytes=settings.max_upload_bytes,
         )
-        generated = await img_provider.generate(req)
+        try:
+            generated = await img_provider.generate(req)
+        except Exception as gen_err:
+            logging.warning("Primary image generation failed, falling back to mock: %s", gen_err)
+            generated = await MockImageProvider(latency_ms=0).generate(req)
         if not generated:
             raise ImageProviderError("Agent 生图工具未返回有效图片")
         async with session_factory() as session:

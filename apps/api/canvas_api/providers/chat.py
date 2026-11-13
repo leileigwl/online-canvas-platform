@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
+import re
 import socket
 from dataclasses import dataclass
 from typing import Protocol
@@ -9,6 +11,20 @@ from urllib.parse import urlsplit
 
 import httpcore
 import httpx
+
+from canvas_api.agent_guardrails import CircuitBreaker, backoff_delay
+
+_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
+_HOST_BREAKERS: dict[str, CircuitBreaker] = {}
+
+
+def _get_breaker(host: str) -> CircuitBreaker:
+    breaker = _HOST_BREAKERS.get(host)
+    if breaker is None:
+        breaker = _HOST_BREAKERS[host] = CircuitBreaker(
+            name=host, failure_threshold=5, reset_timeout=30.0
+        )
+    return breaker
 
 
 class ChatProvider(Protocol):
@@ -146,6 +162,10 @@ class OpenAICompatibleChatProvider:
             raise ProviderError("模型输出长度参数配置无效")
         try:
             safe_url = await asyncio.to_thread(validate_public_https_url, base_url)
+            host_key = (urlsplit(safe_url).hostname or "default").lower()
+            breaker = _get_breaker(host_key)
+            if not breaker.allow_request():
+                raise ProviderError("模型服务暂时熔断保护中，请稍后重试")
             payload = {
                 "model": model,
                 "messages": [
@@ -158,7 +178,7 @@ class OpenAICompatibleChatProvider:
             payload[token_limit_field] = max_output_tokens
             async with build_safe_async_client(timeout=90) as client:
                 response: httpx.Response | None = None
-                for attempt in range(2):
+                for attempt in range(1, 4):
                     try:
                         response = await client.post(
                             f"{safe_url}/chat/completions",
@@ -166,28 +186,41 @@ class OpenAICompatibleChatProvider:
                             json=payload,
                         )
                         response.raise_for_status()
+                        breaker.record_success()
                         break
                     except httpx.HTTPStatusError as error:
                         status_code = error.response.status_code
-                        if attempt == 0 and (status_code == 429 or status_code >= 500):
-                            await asyncio.sleep(1.0)
+                        retryable = status_code == 429 or status_code >= 500
+                        if retryable:
+                            breaker.record_failure()
+                        if attempt < 3 and retryable:
+                            retry_after = error.response.headers.get("Retry-After")
+                            delay = backoff_delay(attempt, base=0.6, cap=8.0)
+                            if retry_after and retry_after.isdigit():
+                                delay = max(delay, min(float(retry_after), 15.0))
+                            await asyncio.sleep(delay)
                             continue
                         raise
                     except (httpx.TimeoutException, httpx.TransportError):
-                        if attempt == 0:
-                            await asyncio.sleep(1.0)
+                        breaker.record_failure()
+                        if attempt < 3:
+                            await asyncio.sleep(backoff_delay(attempt, base=0.6, cap=8.0))
                             continue
                         raise
                 assert response is not None
                 body = response.json()
                 content = body["choices"][0]["message"]["content"]
                 usage = body.get("usage") or {}
+        except ProviderError:
+            raise
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
             raise ProviderError("模型服务请求失败，请检查配置或稍后重试") from error
-        import json
 
+        clean_content = str(content or "").strip()
+        if fence_match := _FENCE_RE.match(clean_content):
+            clean_content = fence_match.group(1).strip()
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(clean_content)
         except (json.JSONDecodeError, TypeError) as error:
             raise ProviderError("模型服务没有返回有效 JSON") from error
         if not isinstance(parsed, dict):

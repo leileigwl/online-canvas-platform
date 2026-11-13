@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from arq import cron
 from arq.connections import RedisSettings
 from arq.constants import default_queue_name, in_progress_key_prefix
+from canvas_api.agent_guardrails import estimate_tokens_cjk, redact_secrets
 from canvas_api.config import Settings, get_settings
 from canvas_api.database import create_database
 from canvas_api.image_assets import persist_generated_images, resolve_user_image_provider
@@ -1521,15 +1522,14 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         live_loop_tokens: int = 0,
         saved_tokens: int = 0,
     ) -> None:
-        current_pinned_tokens = (
-            len(json.dumps(pinned_user_values, ensure_ascii=False)) // 3
+        current_pinned_tokens = estimate_tokens_cjk(
+            json.dumps(pinned_user_values, ensure_ascii=False)
         )
-        current_core_tokens = (
-            len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
-        ) // 3
-        current_recent_tokens = (
-            len(json.dumps(user_context["harness_memory"]["recent_turns"], ensure_ascii=False))
-            // 3
+        current_core_tokens = estimate_tokens_cjk(compacted_summary) + estimate_tokens_cjk(
+            json.dumps(rejected_patterns, ensure_ascii=False)
+        )
+        current_recent_tokens = estimate_tokens_cjk(
+            json.dumps(user_context["harness_memory"]["recent_turns"], ensure_ascii=False)
         )
         total_tok = (
             system_prompts_tokens
@@ -2352,12 +2352,18 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     },
                     "done": False,
                 }
-            final_reply = str(
-                response.get("reply") or response.get("summary") or f"已为你处理「{goal[:40]}」。"
-            ).strip()
-            final_summary = str(
-                response.get("summary") or state.get("summary") or final_reply[:80]
-            ).strip()
+            final_reply = redact_secrets(
+                str(
+                    response.get("reply")
+                    or response.get("summary")
+                    or f"已为你处理「{goal[:40]}」。"
+                ).strip()
+            )
+            final_summary = redact_secrets(
+                str(
+                    response.get("summary") or state.get("summary") or final_reply[:80]
+                ).strip()
+            )
             return {
                 "done": True,
                 "loop_messages": cur_loop,
@@ -2366,6 +2372,22 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 "reply": final_reply,
                 "summary": final_summary,
             }
+
+        # Loop-stuck detection: prevent endless consecutive think/inspect_canvas cycles
+        if action in {"think", "inspect_canvas"} and len(steps_log) >= 3:
+            last_three = [s.get("action") for s in steps_log[-3:]]
+            if all(a in {"think", "inspect_canvas"} for a in last_three):
+                cur_loop.append(
+                    {
+                        "step": step + 1,
+                        "role": "system_guard",
+                        "action": "loop_guard",
+                        "content": (
+                            "系统防呆提示：你已连续多步仅做思考或查看画布，"
+                            "请立即基于已有信息调用 design_canvas 生成方案或调用 respond 结束本轮。"
+                        ),
+                    }
+                )
 
         return {
             "step": step,

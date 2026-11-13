@@ -175,7 +175,7 @@ export function AgentLabPage() {
     "normal" | "collision_repair" | "memory_compaction"
   >("normal");
   const [forceCompact, setForceCompact] = useState(false);
-  const [compactionThresholdPct, setCompactionThresholdPct] = useState(65);
+  const [compactionThresholdPct, setCompactionThresholdPct] = useState(85);
 
   const [runs, setRuns] = useState<AgentRun[]>([]);
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
@@ -505,6 +505,7 @@ export function AgentLabPage() {
     const tb = inspect?.token_breakdown;
     const maxTok = evtBd?.max_context_tokens || tb?.max_context_tokens || 32768;
     const sysTok = evtBd?.system_prompts_tokens ?? tb?.system_prompts_tokens ?? 520;
+    const pinnedTok = evtBd?.pinned_values_tokens ?? tb?.pinned_values_tokens ?? 0;
     const canvasTok = evtBd?.canvas_brief_tokens ?? tb?.canvas_brief_tokens ?? 0;
     const coreTok = evtBd?.core_memory_tokens ?? tb?.core_memory_tokens ?? 0;
     const recentTok = evtBd?.recent_turns_tokens ?? tb?.recent_turns_tokens ?? 0;
@@ -512,12 +513,13 @@ export function AgentLabPage() {
       busy && evtBd
         ? evtBd.live_run_tokens ?? 0
         : activeRun?.completion_tokens_used ?? tb?.live_run_tokens ?? 0;
-    const totalTok = sysTok + canvasTok + coreTok + recentTok + liveTok;
+    const totalTok = sysTok + pinnedTok + canvasTok + coreTok + recentTok + liveTok;
     const thresholdTok = Math.round(maxTok * (compactionThresholdPct / 100));
     const pct = (n: number) => Math.min(100, Math.round((n / Math.max(1, maxTok)) * 1000) / 10);
     return {
       maxTok,
       sysTok,
+      pinnedTok,
       canvasTok,
       coreTok,
       recentTok,
@@ -526,6 +528,7 @@ export function AgentLabPage() {
       thresholdTok,
       totalPct: pct(totalTok),
       sysPct: pct(sysTok),
+      pinnedPct: pct(pinnedTok),
       canvasPct: pct(canvasTok),
       corePct: pct(coreTok),
       recentPct: pct(recentTok),
@@ -1096,10 +1099,10 @@ export function AgentLabPage() {
                       onChange={(e) => setCompactionThresholdPct(Number(e.target.value))}
                       title="自动压缩触发线"
                     >
-                      <option value={5}>压缩线 5%（压测）</option>
-                      <option value={15}>压缩线 15%（短窗）</option>
-                      <option value={40}>压缩线 40%</option>
-                      <option value={65}>压缩线 65%（默认）</option>
+                      <option value={85}>压缩线 85%（推荐·生产标准）</option>
+                      <option value={90}>压缩线 90%（高容忍）</option>
+                      <option value={95}>压缩线 95%（极限水位）</option>
+                      <option value={5}>压缩线 5%（短窗压测专用）</option>
                     </select>
 
                     <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -1241,11 +1244,12 @@ export function AgentLabPage() {
                             display: "flex",
                           }}
                         >
-                          <div style={{ width: `${tokenMeter.sysPct}%`, background: "#4f46e5" }} />
-                          <div style={{ width: `${tokenMeter.canvasPct}%`, background: "#d97706" }} />
-                          <div style={{ width: `${tokenMeter.corePct}%`, background: "#059669" }} />
-                          <div style={{ width: `${tokenMeter.recentPct}%`, background: "#0284c7" }} />
-                          <div style={{ width: `${tokenMeter.livePct}%`, background: "#7c3aed" }} />
+                          <div style={{ width: `${tokenMeter.sysPct}%`, background: "#4f46e5" }} title="系统 Prompt" />
+                          <div style={{ width: `${tokenMeter.pinnedPct}%`, background: "#9333ea" }} title="用户核心观点与参数" />
+                          <div style={{ width: `${tokenMeter.canvasPct}%`, background: "#d97706" }} title="画布现状" />
+                          <div style={{ width: `${tokenMeter.corePct}%`, background: "#059669" }} title="云端因果记忆" />
+                          <div style={{ width: `${tokenMeter.recentPct}%`, background: "#0284c7" }} title="近期对话" />
+                          <div style={{ width: `${tokenMeter.livePct}%`, background: "#7c3aed" }} title="当前循环" />
                         </div>
                         <div
                           style={{
@@ -1262,8 +1266,9 @@ export function AgentLabPage() {
 
                       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11, color: "var(--text-secondary)" }}>
                         <span><i style={{ color: "#4f46e5" }}>●</i> 系统 {tokenMeter.sysTok}</span>
+                        <span><i style={{ color: "#9333ea" }}>●</i> 核心观点/参数 {tokenMeter.pinnedTok}</span>
                         <span><i style={{ color: "#d97706" }}>●</i> 画布 {tokenMeter.canvasTok}</span>
-                        <span><i style={{ color: "#059669" }}>●</i> 云端记忆 {tokenMeter.coreTok}</span>
+                        <span><i style={{ color: "#059669" }}>●</i> 因果记忆 {tokenMeter.coreTok}</span>
                         <span><i style={{ color: "#0284c7" }}>●</i> 近期对话 {tokenMeter.recentTok}</span>
                         <span><i style={{ color: "#7c3aed" }}>●</i> 当前循环 {tokenMeter.liveTok}</span>
                       </div>
@@ -1280,7 +1285,7 @@ export function AgentLabPage() {
                         }}
                       >
                         <strong>循环内自动压缩已触发：</strong>
-                        已自动蒸馏旧过程写入云端会话记忆
+                        已自动将用户核心观点与硬参数剥离固化，并修剪试错过程写入云端
                         {tokenMeter.compactedSaved > 0
                           ? `，本次释放约 ${tokenMeter.compactedSaved} tokens`
                           : ""}
@@ -1288,7 +1293,70 @@ export function AgentLabPage() {
                       </div>
                     )}
 
-                    {/* Cloud Session Core Memory Box */}
+                    {/* Layer 2: Pinned User Directives / Core Values (Immutable Anchor) */}
+                    <div
+                      style={{
+                        borderRadius: 12,
+                        border: "1px solid #e9d5ff",
+                        background: "#faf5ff",
+                        padding: 12,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                        fontSize: 12,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 13 }}>📌</span>
+                          <strong style={{ color: "#6b21a8" }}>
+                            用户核心观点与硬参数（不可压缩强锚定区）
+                          </strong>
+                        </div>
+                        <span
+                          style={{
+                            fontSize: 11,
+                            padding: "1px 8px",
+                            borderRadius: 99,
+                            background: "#f3e8ff",
+                            color: "#7e22ce",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {(activeSession?.pinned_user_values || []).length} 条准则
+                        </span>
+                      </div>
+                      {(activeSession?.pinned_user_values || []).length === 0 ? (
+                        <div style={{ color: "#7e22ce", opacity: 0.85, lineHeight: 1.5 }}>
+                          暂无提取观点（达到 85% 压缩线或清理聊天保留记忆时，将自动从对话中提炼专员观点、比例色值等硬参数，语义去重覆写并 100% 置顶保真）。
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {(activeSession?.pinned_user_values || []).map((val, idx) => (
+                            <div
+                              key={idx}
+                              style={{
+                                display: "flex",
+                                alignItems: "flex-start",
+                                gap: 6,
+                                padding: "6px 9px",
+                                background: "#ffffff",
+                                borderRadius: 6,
+                                border: "1px solid #f3e8ff",
+                                fontSize: 12,
+                                color: "#581c87",
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              <span style={{ color: "#9333ea", fontWeight: 700 }}>•</span>
+                              <span>{val}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Layer 4 Pruning: Cloud Session Core Memory Box (Pruned Causal Memory) */}
                     <div
                       style={{
                         borderRadius: 12,
@@ -1301,11 +1369,14 @@ export function AgentLabPage() {
                       }}
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <strong>
-                          云端持久化记忆（{activeSession?.title || "当前 Agent"} · 已压缩{" "}
-                          {inspect?.memory.compacted_run_count || 0} 轮 · 未压缩{" "}
-                          {inspect?.recent_turns?.length || 0} 轮）
-                        </strong>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 13 }}>☁️</span>
+                          <strong>
+                            过程蒸馏与因果经验（已压缩{" "}
+                            {inspect?.memory.compacted_run_count || 0} 轮 · 活跃{" "}
+                            {inspect?.recent_turns?.length || 0} 轮）
+                          </strong>
+                        </div>
                         <div style={{ display: "flex", gap: 6 }}>
                           <button type="button" className="fc-btn fc-btn-sm" onClick={handleCompactMemory}>
                             手动压缩
@@ -1317,7 +1388,7 @@ export function AgentLabPage() {
                       </div>
                       <div style={{ color: "var(--text-secondary)", whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
                         {inspect?.memory.compacted_summary ||
-                          "暂无云端摘要（当循环触及压缩线、手动点击压缩或「清空聊天并保留记忆」时自动沉淀）"}
+                          "暂无过程摘要（当循环触及压缩线、手动点击压缩或「清空聊天并保留记忆」时，中间试错将被修剪为关键因果经验）"}
                       </div>
                     </div>
 

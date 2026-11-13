@@ -292,6 +292,7 @@ class CanvasMemoryOut(APIModel):
     max_context_tokens: int
     compaction_threshold_tokens: int
     rejected_feedback: list[str] = Field(default_factory=list)
+    pinned_user_values: list[str] = Field(default_factory=list)
 
 
 ImageProviderLiteral = Literal[
@@ -372,13 +373,13 @@ class HarnessRunOptions(APIModel):
     force_compact: bool = False
     max_repair_rounds: int = Field(default=2, ge=0, le=3)
     max_loop_steps: int = Field(default=10, ge=2, le=16)
-    compaction_threshold_pct: int = Field(default=65, ge=5, le=90)
+    compaction_threshold_pct: int = Field(default=85, ge=5, le=95)
 
 
 class HarnessInspectRequest(APIModel):
     operations: list[dict] = Field(default_factory=list, max_length=12)
     session_id: uuid.UUID | None = None
-    compaction_threshold_pct: int = Field(default=65, ge=5, le=90)
+    compaction_threshold_pct: int = Field(default=85, ge=5, le=95)
 
 
 class MemoryCompactRequest(APIModel):
@@ -405,6 +406,7 @@ class AgentSessionOut(APIModel):
     max_context_tokens: int
     compaction_threshold_tokens: int
     rejected_feedback: list[str]
+    pinned_user_values: list[str] = Field(default_factory=list)
     chat_cleared_at: str | None = None
     created_at: str
     updated_at: str

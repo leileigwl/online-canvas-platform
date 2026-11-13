@@ -2276,11 +2276,12 @@ async def _distill_runs_summary(
     *,
     runs: list[AgentRun],
     prev_summary: str,
+    prev_pinned: list[str],
     rejected: list[str],
     llm_mode: str,
     cfg: ModelConfig | None,
     settings: Settings,
-) -> str:
+) -> tuple[list[str], str]:
     turn_lines = [
         (
             f"- [{r.status.value if isinstance(r.status, RunStatus) else r.status}] "
@@ -2288,6 +2289,7 @@ async def _distill_runs_summary(
         )
         for r in runs
     ]
+    new_pinned = list(prev_pinned or [])
     new_core = ""
     if llm_mode == "real" and cfg is not None:
         chat_provider = OpenAICompatibleChatProvider()
@@ -2297,12 +2299,17 @@ async def _distill_runs_summary(
                 api_key=decrypt_secret(cfg.encrypted_api_key, settings),
                 model=cfg.model_name,
                 system=(
-                    "你是 FlowCanvas Harness Memory Compactor。"
-                    "请把给定历史轮次与现有 core_memory 蒸馏为 400 字以内结构化中文核心记忆，"
-                    '仅返回 JSON：{"core_memory":"..."}。'
+                    "你是 FlowCanvas 上下文精炼与分离压缩器。"
+                    "请将历史对话严格剥离为两个互斥部分："
+                    "1. pinned_user_values: 提取用户核心专业观点、专员情报与硬性参数"
+                    "（如16:9比例、精确色值/尺寸），"
+                    "   采用语义融合与冲突覆写（新要求覆盖旧要求，去重合并），返回高密度准则列表；"
+                    "2. core_memory: 过程蒸馏与因果经验（修剪试错细节，保留关键决策解）。"
+                    '只返回纯 JSON：{"pinned_user_values":["..."], "core_memory":"..."}。'
                 ),
                 user=json.dumps(
                     {
+                        "previous_pinned_values": prev_pinned,
                         "previous_core_memory": prev_summary,
                         "rejected_patterns": rejected,
                         "turns": turn_lines,
@@ -2312,19 +2319,39 @@ async def _distill_runs_summary(
                 max_output_tokens=800,
                 token_limit_field=settings.chat_completion_token_limit_field,
             )
-            new_core = str(compacted_res.content.get("core_memory") or "").strip()
+            data = compacted_res.content or {}
+            ext_pinned = data.get("pinned_user_values")
+            if isinstance(ext_pinned, list) and ext_pinned:
+                new_pinned = [str(x).strip() for x in ext_pinned if str(x).strip()][:15]
+            new_core = str(data.get("core_memory") or "").strip()
         except ProviderError:
             new_core = ""
+
+    if not new_pinned and runs:
+        # Fallback heuristic: capture design parameters
+        for r in runs:
+            g = str(r.goal or "")
+            if "16:9" in g and "比例参数：保持 16:9 比例" not in new_pinned:
+                new_pinned.append("比例参数：保持 16:9 比例")
+            if "暖象牙" in g and "视觉偏好：极简暖象牙调 (#F5E8D0)" not in new_pinned:
+                new_pinned.append("视觉偏好：极简暖象牙调 (#F5E8D0)")
+            if ("核磁共振" in g or "专员" in g) and (
+                "专员情报：关注对比度与严谨边界排布" not in new_pinned
+            ):
+                new_pinned.append("专员情报：关注对比度与严谨边界排布")
+        if not new_pinned and runs:
+            new_pinned.append(f"核心目标约束：{str(runs[-1].goal)[:60]}")
+
     if not new_core:
         merged = [seg for seg in (prev_summary, *turn_lines) if seg]
         if rejected:
             merged.append("已否决方向：" + "；".join(rejected[-3:]))
         new_core = "\n".join(merged)[-900:]
-    return new_core
+    return new_pinned, new_core
 
 
 async def _agent_session_out(
-    session: AsyncSession, agent_session: AgentSession, max_tokens: int, threshold_pct: int = 65
+    session: AsyncSession, agent_session: AgentSession, max_tokens: int, threshold_pct: int = 85
 ) -> AgentSessionOut:
     stmt = select(AgentRun).where(
         AgentRun.owner_id == agent_session.owner_id,
@@ -2354,6 +2381,7 @@ async def _agent_session_out(
         max_context_tokens=max_tokens,
         compaction_threshold_tokens=int(max_tokens * (threshold_pct / 100.0)),
         rejected_feedback=list(agent_session.rejected_feedback or []),
+        pinned_user_values=list(agent_session.pinned_user_values or []),
         chat_cleared_at=_iso(agent_session.chat_cleared_at)
         if agent_session.chat_cleared_at
         else None,
@@ -2456,14 +2484,16 @@ async def clear_agent_session_chat(
             if idx >= 0:
                 uncompacted = runs[idx + 1 :]
         if uncompacted:
-            new_core = await _distill_runs_summary(
+            new_pinned, new_core = await _distill_runs_summary(
                 runs=uncompacted,
                 prev_summary=agent_session.compacted_summary or "",
+                prev_pinned=list(agent_session.pinned_user_values or []),
                 rejected=list(agent_session.rejected_feedback or []),
                 llm_mode=payload.llm_mode,
                 cfg=cfg,
                 settings=request.app.state.settings,
             )
+            agent_session.pinned_user_values = new_pinned
             agent_session.compacted_summary = new_core
             agent_session.compacted_run_count = (agent_session.compacted_run_count or 0) + len(
                 uncompacted
@@ -2512,15 +2542,17 @@ async def compact_session_memory_now(
         keep_tail = 1 if len(recent_runs) >= 2 else 0
         to_compact = recent_runs[:-keep_tail] if keep_tail else recent_runs
         tail_runs = recent_runs[-keep_tail:] if keep_tail else []
-        new_core = await _distill_runs_summary(
+        new_pinned, new_core = await _distill_runs_summary(
             runs=to_compact,
             prev_summary=agent_session.compacted_summary or "",
+            prev_pinned=list(agent_session.pinned_user_values or []),
             rejected=list(agent_session.rejected_feedback or []),
             llm_mode=payload.llm_mode,
             cfg=cfg,
             settings=request.app.state.settings,
         )
         tail_chars = sum(len(r.goal) + len(r.summary or "") for r in tail_runs)
+        agent_session.pinned_user_values = new_pinned
         agent_session.compacted_summary = new_core
         agent_session.compacted_run_count = (agent_session.compacted_run_count or 0) + len(
             to_compact
@@ -2556,6 +2588,7 @@ async def reset_session_memory(
     agent_session.last_compacted_run_id = latest_run_id
     agent_session.estimated_tokens = 0
     agent_session.rejected_feedback = []
+    agent_session.pinned_user_values = []
     await session.commit()
     await session.refresh(agent_session)
     cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
@@ -2624,8 +2657,9 @@ async def get_canvas_memory(
         recent_run_count=len(recent_runs),
         estimated_tokens=est_tokens,
         max_context_tokens=max_tokens,
-        compaction_threshold_tokens=int(max_tokens * 0.65),
+        compaction_threshold_tokens=int(max_tokens * 0.85),
         rejected_feedback=list(memory.rejected_feedback or []) if memory else [],
+        pinned_user_values=list(memory.pinned_user_values or []) if memory else [],
     )
 
 
@@ -2697,7 +2731,7 @@ async def inspect_canvas_harness(
     layout_report = verify_proposal_layout(items, validated_ops)
     cfg = await session.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id))
     max_tokens = (cfg.max_context_tokens if cfg else None) or 32768
-    threshold_pct = payload.compaction_threshold_pct or 65
+    threshold_pct = payload.compaction_threshold_pct or 85
     agent_session: AgentSession | None = None
     if payload.session_id is not None:
         agent_session = await session.scalar(
@@ -2718,6 +2752,7 @@ async def inspect_canvas_harness(
             "max_context_tokens": sess_out.max_context_tokens,
             "compaction_threshold_tokens": sess_out.compaction_threshold_tokens,
             "rejected_feedback": sess_out.rejected_feedback,
+            "pinned_user_values": sess_out.pinned_user_values,
         }
         run_stmt = select(AgentRun).where(
             AgentRun.owner_id == user.id,
@@ -2796,6 +2831,9 @@ async def inspect_canvas_harness(
     ]
     # Approximate token buckets aligned with Anthropic / Claude Code /context breakdown
     system_prompts_tokens = 520 if payload.session_id else 620
+    pinned_values_tokens = (
+        len(json.dumps(mem_payload.get("pinned_user_values") or [], ensure_ascii=False)) // 3
+    )
     brief_tokens = len(json.dumps(canvas_brief, ensure_ascii=False)) // 3
     core_memory_tokens = (
         len(mem_payload["compacted_summary"])
@@ -2806,6 +2844,7 @@ async def inspect_canvas_harness(
     live_run_tokens = latest_run.completion_tokens_used if latest_run else 0
     total_tokens = (
         system_prompts_tokens
+        + pinned_values_tokens
         + brief_tokens
         + core_memory_tokens
         + recent_turns_tokens
@@ -2827,6 +2866,7 @@ async def inspect_canvas_harness(
         "recent_turns": recent_turns_preview,
         "token_breakdown": {
             "system_prompts_tokens": system_prompts_tokens,
+            "pinned_values_tokens": pinned_values_tokens,
             "canvas_brief_tokens": brief_tokens,
             "core_memory_tokens": core_memory_tokens,
             "recent_turns_tokens": recent_turns_tokens,

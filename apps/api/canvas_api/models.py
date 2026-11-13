@@ -191,6 +191,7 @@ class CanvasMemory(UUIDModel):
     )
     estimated_tokens: Mapped[int] = mapped_column(Integer, default=0)
     rejected_feedback: Mapped[list] = mapped_column(JSON_DOCUMENT, default=list)
+    pinned_user_values: Mapped[list] = mapped_column(JSON_DOCUMENT, default=list)
 
 
 class AgentSession(UUIDModel):
@@ -212,6 +213,7 @@ class AgentSession(UUIDModel):
     )
     estimated_tokens: Mapped[int] = mapped_column(Integer, default=0)
     rejected_feedback: Mapped[list] = mapped_column(JSON_DOCUMENT, default=list)
+    pinned_user_values: Mapped[list] = mapped_column(JSON_DOCUMENT, default=list)
     chat_cleared_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )

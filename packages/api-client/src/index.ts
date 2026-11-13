@@ -138,6 +138,7 @@ export type AgentSession = {
   max_context_tokens: number;
   compaction_threshold_tokens: number;
   rejected_feedback: string[];
+  pinned_user_values: string[];
   chat_cleared_at: string | null;
   created_at: string;
   updated_at: string;
@@ -215,6 +216,7 @@ export type CanvasMemory = {
   max_context_tokens: number;
   compaction_threshold_tokens: number;
   rejected_feedback: string[];
+  pinned_user_values?: string[];
 };
 
 export type HarnessInspectResult = {
@@ -240,6 +242,7 @@ export type HarnessInspectResult = {
   }>;
   token_breakdown: {
     system_prompts_tokens?: number;
+    pinned_values_tokens?: number;
     canvas_brief_tokens: number;
     core_memory_tokens?: number;
     recent_turns_tokens?: number;

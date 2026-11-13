@@ -84,6 +84,11 @@ AUTONOMOUS_LEAD_PROMPT = "\n".join(
             "不要移动用户无关已有内容（如画笔涂鸦）。"
         ),
         (
+            "强约束基准：若上下文中存在 pinned_user_values（不可压缩核心观点与硬参数，"
+            "如专员情报、16:9比例、明确色彩尺寸、禁止事项等），"
+            "这是最高优先级真值源，绝不可违背或擅自简化。"
+        ),
+        (
             "规则：简单问答可直接 respond；需要画布改动时调用 design_canvas，"
             "系统会自动执行确定性几何碰撞校验并把结果返回到你下一轮循环中。"
             "若校验失败，你必须再次调用 design_canvas 修正坐标后才可 respond。"
@@ -113,13 +118,18 @@ COORDINATOR_PROMPT = "\n".join(
 )
 COMPACTOR_PROMPT = "\n".join(
     (
-        "你是 FlowCanvas Harness Memory Compactor（类似 Cursor/Devin 上下文压缩器）。",
-        "将较早的画布对话轮次与现有 core_summary 蒸馏压缩为 500 字以内的高密度核心记忆。",
+        "你是 FlowCanvas 上下文精炼与分离压缩器（类似 Claude Code / Devin 内存工程架构）。",
+        "在上下文达到高阈值时，将历史输入与中间试错严格剥离为两个互斥模块：",
         (
-            "必须保留：视觉风格偏好、配色光线要求、核心参考图 ID/角色对应、"
-            "以及用户拒绝/回退的原因；剔除冗余过程。"
+            "1. pinned_user_values（不可压缩观点与硬参数）：从用户输入提取核心观点、"
+            "专员情报、明确比例/色值/尺寸；执行语义融合与冲突覆写（新覆盖旧，去重合并），"
+            "输出紧凑的黄金准则列表。"
         ),
-        '只返回 JSON：{"core_memory":"紧凑的结构化中文核心记忆"}。',
+        (
+            "2. core_memory（因果经验与修剪摘要）：语义化修剪中间碰撞重算与冗长过程，"
+            "提炼为高密度的因果决策简报（300字以内），保留最终修复经验。"
+        ),
+        '只返回纯 JSON：{"pinned_user_values":["准则1: ..."],"core_memory":"因果经验"}。',
     )
 )
 PLANNER_PROMPT = "\n".join(
@@ -211,25 +221,47 @@ def _model_for_role(config: dict | None, role: str) -> str:
 
 def _scripted_model_response(*, system: str, user: str, lab_scenario: str) -> dict:
     payload = json.loads(user)
-    if "Harness Memory Compactor" in system:
+    if "Memory Compactor" in system or "分离压缩器" in system:
         turns = payload.get("turns_to_compact") or []
         loop_steps = payload.get("loop_steps_to_compact") or []
         prev = str(payload.get("previous_core_memory") or "").strip()
         rejected = payload.get("rejected_patterns") or []
+        pinned = list(payload.get("previous_pinned_user_values") or [])
+        cur_g = str(payload.get("current_goal") or "")
+        all_goals = ([cur_g] if cur_g else []) + [str(t.get("goal") or "") for t in turns]
+        for g in all_goals:
+            if not g:
+                continue
+            if "16:9" in g and "比例参数：保持 16:9 比例" not in pinned:
+                pinned.append("比例参数：保持 16:9 比例")
+            if "暖象牙" in g and "视觉偏好：极简暖象牙调 (#F5E8D0)" not in pinned:
+                pinned.append("视觉偏好：极简暖象牙调 (#F5E8D0)")
+            if ("核磁共振" in g or "专员" in g) and (
+                "专员情报：关注对比度与严谨边界排布" not in pinned
+            ):
+                pinned.append("专员情报：关注对比度与严谨边界排布")
+            if "猫" in g and not any("猫" in p for p in pinned):
+                pinned.append("主体设定：卡通小猫/萌宠元素")
+        if not pinned and all_goals:
+            pinned.append(f"核心目标约束：{str(all_goals[-1])[:60]}")
+
         summary_lines = [
             f"[{t.get('decision', 'proposed')}] {str(t.get('goal', ''))[:60]}"
-            for t in turns[-6:]
+            for t in turns[-4:]
         ]
         if loop_steps:
             summary_lines.extend(
-                f"[步骤:{s.get('action', 'step')}] {str(s.get('content', ''))[:60]}"
-                for s in loop_steps[-4:]
+                f"[因果记录] {str(s.get('action', 'step'))}: {str(s.get('content', ''))[:50]}"
+                for s in loop_steps[-3:]
             )
         if prev:
-            summary_lines.insert(0, prev[:240])
+            summary_lines.insert(0, prev[:200])
         if rejected:
-            summary_lines.append("规避否决模式: " + "; ".join(str(x)[:50] for x in rejected[-3:]))
-        return {"core_memory": " | ".join(summary_lines)[:500] or "已完成历史对话压缩"}
+            summary_lines.append("规避否决: " + "; ".join(str(x)[:40] for x in rejected[-3:]))
+        return {
+            "pinned_user_values": pinned[:8],
+            "core_memory": " | ".join(summary_lines)[:500] or "已完成历史试错修剪与因果蒸馏",
+        }
 
     if "自主主创作 Agent" in system:
         goal = str(payload.get("goal") or "创意排版与生图")
@@ -1238,6 +1270,9 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             recent_runs = prior_runs[anchor_idx + 1 :]
     compacted_summary = memory_source.compacted_summary if memory_source else ""
     rejected_patterns = list(memory_source.rejected_feedback or []) if memory_source else []
+    pinned_user_values = (
+        list(memory_source.pinned_user_values or []) if memory_source else []
+    )
     recent_payload = [_summarize_turn(r) for r in recent_runs]
     canvas_brief = _canvas_summary(canvas_items)
     visible_boxes = [
@@ -1262,23 +1297,30 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         "below_clear_y": round(max_y + 48, 1) if visible_boxes else 160.0,
     }
     system_prompts_tokens = 620
+    pinned_tokens = len(json.dumps(pinned_user_values, ensure_ascii=False)) // 3
     canvas_tokens = len(json.dumps(canvas_brief, ensure_ascii=False)) // 3
     core_memory_tokens = (
         len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
     ) // 3
     recent_turns_tokens = len(json.dumps(recent_payload, ensure_ascii=False)) // 3
     approx_tokens = (
-        system_prompts_tokens + canvas_tokens + core_memory_tokens + recent_turns_tokens
+        system_prompts_tokens
+        + pinned_tokens
+        + canvas_tokens
+        + core_memory_tokens
+        + recent_turns_tokens
     )
     compact_threshold = int(max_context_tokens * (compaction_threshold_pct / 100.0))
 
     user_context = {
         "goal": goal,
+        "pinned_user_values": pinned_user_values,
         "context_revision": context_revision,
         "canvas": canvas_brief,
         "layout_anchors": layout_anchors,
         "authorized_reference_image_metadata": references,
         "harness_memory": {
+            "pinned_user_values": pinned_user_values,
             "core_summary": compacted_summary,
             "rejected_patterns": rejected_patterns,
             "recent_turns": recent_payload,
@@ -1437,6 +1479,9 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         live_loop_tokens: int = 0,
         saved_tokens: int = 0,
     ) -> None:
+        current_pinned_tokens = (
+            len(json.dumps(pinned_user_values, ensure_ascii=False)) // 3
+        )
         current_core_tokens = (
             len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
         ) // 3
@@ -1446,6 +1491,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         )
         total_tok = (
             system_prompts_tokens
+            + current_pinned_tokens
             + canvas_tokens
             + current_core_tokens
             + current_recent_tokens
@@ -1462,13 +1508,15 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     f"上下文快照（{phase} · {total_tok}/{max_context_tokens} tokens）"
                 ),
                 "text": (
-                    f"系统 ~{system_prompts_tokens} · 画布 ~{canvas_tokens} · "
-                    f"云端记忆 ~{current_core_tokens} · 近期对话 ~{current_recent_tokens}"
+                    f"系统 ~{system_prompts_tokens} · 观点/参数 ~{current_pinned_tokens} · "
+                    f"画布 ~{canvas_tokens} · 云端记忆 ~{current_core_tokens} · "
+                    f"近期对话 ~{current_recent_tokens}"
                     + (f" · 循环过程 ~{live_loop_tokens}" if live_loop_tokens else "")
                     + " tok"
                 ),
                 "breakdown": {
                     "system_prompts_tokens": system_prompts_tokens,
+                    "pinned_values_tokens": current_pinned_tokens,
                     "canvas_brief_tokens": canvas_tokens,
                     "core_memory_tokens": current_core_tokens,
                     "recent_turns_tokens": current_recent_tokens,
@@ -1489,6 +1537,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         compacted_delta: int,
         last_run_id: uuid.UUID | None,
         est_tokens: int,
+        pinned_values: list[str] | None = None,
     ) -> None:
         if session_uuid is not None:
             sess_row = await mem_save.scalar(
@@ -1504,6 +1553,8 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 if last_run_id is not None:
                     sess_row.last_compacted_run_id = last_run_id
                 sess_row.estimated_tokens = est_tokens
+                if pinned_values is not None:
+                    sess_row.pinned_user_values = pinned_values
             return
         row = await mem_save.scalar(
             select(CanvasMemory)
@@ -1519,6 +1570,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 last_compacted_run_id=last_run_id,
                 estimated_tokens=est_tokens,
                 rejected_feedback=rejected_patterns,
+                pinned_user_values=pinned_values or [],
             )
             mem_save.add(row)
         else:
@@ -1527,9 +1579,11 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             if last_run_id is not None:
                 row.last_compacted_run_id = last_run_id
             row.estimated_tokens = est_tokens
+            if pinned_values is not None:
+                row.pinned_user_values = pinned_values
 
     async def _maybe_compact_harness_memory(writer: StreamWriter) -> None:
-        nonlocal compacted_summary, approx_tokens
+        nonlocal compacted_summary, approx_tokens, pinned_user_values
         should_compact = (
             (force_compact and len(recent_runs) >= 1)
             or (lab_scenario == "memory_compaction" and len(recent_runs) >= 1)
@@ -1573,6 +1627,8 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             system=COMPACTOR_PROMPT,
             user=json.dumps(
                 {
+                    "current_goal": goal,
+                    "previous_pinned_user_values": pinned_user_values,
                     "previous_core_memory": compacted_summary,
                     "rejected_patterns": rejected_patterns,
                     "turns_to_compact": [_summarize_turn(r) for r in head_runs],
@@ -1580,10 +1636,14 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 ensure_ascii=False,
             ),
         )
+        ext_pinned = compacted.get("pinned_user_values")
+        if isinstance(ext_pinned, list) and ext_pinned:
+            pinned_user_values = [str(x).strip() for x in ext_pinned if str(x).strip()][:15]
         new_core = str(compacted.get("core_memory") or compacted_summary).strip()[:1200]
         compacted_summary = new_core
         approx_tokens = (
             len(compacted_summary)
+            + len(json.dumps(pinned_user_values, ensure_ascii=False))
             + len(json.dumps(tail_payload, ensure_ascii=False))
             + len(json.dumps(canvas_brief, ensure_ascii=False))
         ) // 3
@@ -1594,9 +1654,12 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 compacted_delta=len(head_runs),
                 last_run_id=head_runs[-1].id,
                 est_tokens=approx_tokens,
+                pinned_values=pinned_user_values,
             )
             await mem_save.commit()
+        user_context["pinned_user_values"] = pinned_user_values
         user_context["harness_memory"] = {
+            "pinned_user_values": pinned_user_values,
             "core_summary": compacted_summary,
             "rejected_patterns": rejected_patterns,
             "recent_turns": tail_payload,
@@ -2016,6 +2079,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
     auto_model_name = _model_for_role(model_config_data, "Lead Agent")
 
     def _current_auto_tokens(loop_msgs: list[dict]) -> tuple[int, int, int, int]:
+        cur_pinned = len(json.dumps(pinned_user_values, ensure_ascii=False)) // 3
         cur_core = (
             len(compacted_summary) + len(json.dumps(rejected_patterns, ensure_ascii=False))
         ) // 3
@@ -2026,11 +2090,18 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
         cur_loop = (len(json.dumps(loop_msgs, ensure_ascii=False)) // 3) + auto_totals[
             "completion_tokens"
         ]
-        total = system_prompts_tokens + canvas_tokens + cur_core + cur_recent + cur_loop
+        total = (
+            system_prompts_tokens
+            + cur_pinned
+            + canvas_tokens
+            + cur_core
+            + cur_recent
+            + cur_loop
+        )
         return cur_core, cur_recent, cur_loop, total
 
     async def auto_lead_agent(state: AutonomousAgentState, writer: StreamWriter) -> dict:
-        nonlocal compacted_summary, recent_runs, approx_tokens
+        nonlocal compacted_summary, recent_runs, approx_tokens, pinned_user_values
         step = int(state.get("step") or 0)
         cur_loop = list(state.get("loop_messages") or [])
         cur_ops = list(state.get("operations") or [])
@@ -2075,10 +2146,10 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     "kind": "thinking",
                     "role": "Memory",
                     "action": "compact",
-                    "title": f"自动压缩记忆（约 {total_live}/{compact_threshold} tok）",
+                    "title": f"自动精炼压缩（约 {total_live}/{compact_threshold} tok）",
                     "text": (
-                        f"正在将 {len(turns_to_compact)} 轮历史与 {len(head_loop)} 步过程"
-                        "蒸馏同步到云端会话记忆..."
+                        f"正在将 {len(turns_to_compact)} 轮历史与 {len(head_loop)} 步试错"
+                        "剥离为置顶核心准则与因果记忆..."
                     ),
                 }
             )
@@ -2087,6 +2158,8 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                 system=COMPACTOR_PROMPT,
                 user=json.dumps(
                     {
+                        "current_goal": goal,
+                        "previous_pinned_user_values": pinned_user_values,
                         "previous_core_memory": compacted_summary,
                         "rejected_patterns": rejected_patterns,
                         "turns_to_compact": [_summarize_turn(r) for r in turns_to_compact],
@@ -2095,11 +2168,18 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     ensure_ascii=False,
                 ),
             )
+            ext_pinned = compacted_res.get("pinned_user_values")
+            if isinstance(ext_pinned, list) and ext_pinned:
+                pinned_user_values = [
+                    str(x).strip() for x in ext_pinned if str(x).strip()
+                ][:15]
             new_core = str(compacted_res.get("core_memory") or compacted_summary).strip()[:1200]
             compacted_summary = new_core
             recent_runs = remaining_turns
             tail_payload = [_summarize_turn(r) for r in remaining_turns]
+            user_context["pinned_user_values"] = pinned_user_values
             user_context["harness_memory"] = {
+                "pinned_user_values": pinned_user_values,
                 "core_summary": compacted_summary,
                 "rejected_patterns": rejected_patterns,
                 "recent_turns": tail_payload,
@@ -2110,7 +2190,10 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                         "step": step,
                         "role": "compactor",
                         "action": "cloud_memory_sync",
-                        "content": f"[已自动蒸馏并同步至云端记忆] {compacted_summary[:220]}",
+                        "content": (
+                            f"[已剥离固化观点与硬参数并同步云端] "
+                            f"准则: {len(pinned_user_values)} 条 | 摘要: {compacted_summary[:160]}"
+                        ),
                     },
                     *tail_loop,
                 ]
@@ -2119,6 +2202,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
             )
             approx_tokens = (
                 len(compacted_summary)
+                + len(json.dumps(pinned_user_values, ensure_ascii=False))
                 + len(json.dumps(tail_payload, ensure_ascii=False))
                 + len(json.dumps(canvas_brief, ensure_ascii=False))
             ) // 3
@@ -2129,6 +2213,7 @@ async def execute_agent_run(ctx: dict, run_id: str) -> None:
                     compacted_delta=len(turns_to_compact) + (1 if head_loop else 0),
                     last_run_id=turns_to_compact[-1].id if turns_to_compact else None,
                     est_tokens=approx_tokens,
+                    pinned_values=pinned_user_values,
                 )
                 await mem_save.commit()
             compaction_count += 1
